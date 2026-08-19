@@ -11,6 +11,7 @@ Running a persistent agentic OS inside Kiro Web: second brain in `brain/`,
 kernel in `.kiro/steering/`, skills as programs, loops as the control system.
 
 ## Active loops
+- `go-local` — move onto the PC via Kiro Crew, where a real daemon + scheduler exist
 - `harden-agentos` — prove each subsystem survives a real session boundary
 
 ## Environment facts (Kiro Web, verified 2026-08-19)
@@ -41,5 +42,12 @@ The earlier copy on `test-repo` branch `agentos` (PR #11) is superseded; ignore 
   always-included kernel file carries the boot instruction instead.
 - Grep over markdown instead of a vector DB. See [[Grep Beats Embeddings Here]].
 
+## The real runtime is local
+Kiro Web can host this OS but cannot make it *persistent* — no daemon, no cron.
+Kiro Crew can, on the user's own hardware, driving `kiro-cli` over ACP so it runs
+on the Kiro subscription. Verified: `kirocrew 0.2.0` installs, `doctor` clean.
+See [[Kiro Crew Is The Local OS]]. Claude Code is a dead end for this —
+[[Claude Code Cannot Use Kiro Models]].
+
 ## Next action
-`bin/os loop next harden-agentos`
+`bin/os loop next go-local`

@@ -1,0 +1,26 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "AgentOS boot",
+      "description": "Load the second brain into context at session start. IDE and CLI only — Kiro Web does not run hooks, where .kiro/steering/00-kernel.md carries the same instruction.",
+      "trigger": "SessionStart",
+      "action": {
+        "type": "command",
+        "command": "bash bin/os boot"
+      },
+      "timeout": 30
+    },
+    {
+      "name": "AgentOS vault check",
+      "description": "Verify the vault stays well-formed after any write under brain/.",
+      "trigger": "PostFileSave",
+      "matcher": "brain/.*\\.md$",
+      "action": {
+        "type": "command",
+        "command": "bash bin/os selftest"
+      },
+      "timeout": 30
+    }
+  ]
+}

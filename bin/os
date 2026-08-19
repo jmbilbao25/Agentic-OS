@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# AgentOS — the whole runtime. One script, no dependencies beyond git + python3.
+# Git is the disk: the sandbox is ephemeral, so `save` is not optional.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+BRAIN="$ROOT/brain"
+PY="$ROOT/bin/osutil.py"
+TODAY="$(date +%F)"
+JOURNAL="$BRAIN/journal/$TODAY.md"
+
+die() { echo "os: $*" >&2; exit 1; }
+
+ensure_journal() {
+  mkdir -p "$BRAIN/journal"
+  [ -f "$JOURNAL" ] || printf -- '---\ndate: %s\n---\n\n# %s\n\n' "$TODAY" "$TODAY" > "$JOURNAL"
+}
+
+cmd_boot() {
+  git pull --ff-only -q 2>/dev/null || echo "(no remote pull — working offline)"
+  echo "=============== AgentOS boot // $(date -u '+%F %H:%MZ') ==============="
+  echo
+  echo "--- WORKING MEMORY (brain/STATE.md) ---"
+  cat "$BRAIN/STATE.md"
+  echo
+  echo "--- OPEN LOOPS ---"
+  python3 "$PY" loop-status
+  echo
+  echo "--- LESSONS (brain/lessons.md) ---"
+  grep -E '^- ' "$BRAIN/lessons.md" 2>/dev/null || echo "(none yet)"
+  echo
+  echo "--- LAST JOURNAL ENTRIES ---"
+  ls -1 "$BRAIN/journal"/*.md 2>/dev/null | tail -2 | while read -r f; do
+    echo "## $(basename "$f" .md)"; sed -n '5,40p' "$f"; echo
+  done
+  echo "--- VAULT ---"
+  echo "notes: $(find "$BRAIN/notes" -name '*.md' 2>/dev/null | wc -l)   decisions: $(find "$BRAIN/decisions" -name '*.md' 2>/dev/null | wc -l)   journal: $(find "$BRAIN/journal" -name '*.md' 2>/dev/null | wc -l)"
+  echo "recall with: bin/os recall \"<term>\"    |    end session with: bin/os save \"<summary>\""
+  echo "======================================================================="
+}
+
+cmd_log() {
+  [ $# -ge 1 ] || die 'usage: os log "what happened"'
+  ensure_journal
+  printf -- '- %s — %s\n' "$(date -u +%H:%MZ)" "$*" >> "$JOURNAL"
+  echo "logged → brain/journal/$TODAY.md"
+}
+
+cmd_lesson() {
+  [ $# -ge 1 ] || die 'usage: os lesson "When X → do Y. Because Z."'
+  case "$*" in *"→"*|*"->"*) ;; *) echo "warn: lessons need a trigger — 'When <situation> → <action>'" >&2 ;; esac
+  printf -- '- %s _(%s)_\n' "$*" "$TODAY" >> "$BRAIN/lessons.md"
+  echo "learned → brain/lessons.md"
+}
+
+cmd_note() {
+  [ $# -ge 1 ] || die 'usage: os note "Title"'
+  mkdir -p "$BRAIN/notes"
+  local f="$BRAIN/notes/$*.md"
+  [ -f "$f" ] && { echo "exists (edit it, do not duplicate) → brain/notes/$*.md"; exit 0; }
+  printf -- '---\ncreated: %s\ntags: []\n---\n\n# %s\n\n\n\nRelated: \n' "$TODAY" "$*" > "$f"
+  echo "created → brain/notes/$*.md"
+}
+
+cmd_decide() {
+  [ $# -ge 1 ] || die 'usage: os decide "Title"'
+  mkdir -p "$BRAIN/decisions"
+  local f="$BRAIN/decisions/$TODAY $*.md"
+  printf -- '---\ndate: %s\nstatus: accepted\n---\n\n# %s\n\n## Context\n\n## Decision\n\n## Tradeoff\nWhat this costs us:\n\n## Alternatives rejected\n' "$TODAY" "$*" > "$f"
+  echo "created → brain/decisions/$TODAY $*.md  (fill in Context/Decision/Tradeoff)"
+}
+
+cmd_recall() {
+  [ $# -ge 1 ] || die 'usage: os recall "<term>"'
+  local rg; rg=$(command -v rg || echo "grep -r")
+  echo "--- hits for '$*' ---"
+  $rg -in --color=never "$*" "$BRAIN" 2>/dev/null | head -40 || true
+  echo "--- filenames matching ---"
+  find "$BRAIN" -iname "*$**" 2>/dev/null | head -20 || true
+}
+
+cmd_loop() {
+  local sub="${1:-status}"; shift || true
+  case "$sub" in
+    new)
+      [ $# -ge 1 ] || die 'usage: os loop new <name>'
+      mkdir -p "$BRAIN/loops"
+      local f="$BRAIN/loops/$1.md"
+      [ -f "$f" ] && die "loop exists: brain/loops/$1.md"
+      printf -- '---\nloop: %s\nstatus: open\ncheck: \ncreated: %s\n---\n\n# Goal\n\n\n# Done when\n\n\n# Steps\n- [ ] \n\n# Notes\n' "$1" "$TODAY" > "$f"
+      echo "created → brain/loops/$1.md  (write Goal, Done when, and Steps before iterating)"
+      ;;
+    next|done|close|status) python3 "$PY" "loop-$sub" "$@" ;;
+    *) die "unknown: os loop $sub" ;;
+  esac
+}
+
+cmd_dash() { python3 "$PY" dash; }
+
+cmd_save() {
+  cmd_dash
+  local msg="${*:-brain: sync $(date -u '+%F %H:%MZ')}"
+  git add -A brain docs .kiro bin 2>/dev/null || true
+  if git diff --cached --quiet; then echo "nothing to save"; return 0; fi
+  git commit -q -m "brain: $msg"
+  if git remote get-url origin >/dev/null 2>&1; then
+    local br; br="$(git rev-parse --abbrev-ref HEAD)"
+    git push -q origin "$br" && echo "saved + pushed → origin/$br"
+  else
+    echo "committed locally (no origin remote — add one or this dies with the sandbox)"
+  fi
+}
+
+cmd_selftest() { python3 "$PY" selftest; }
+
+case "${1:-boot}" in
+  boot) cmd_boot ;;
+  log) shift; cmd_log "$@" ;;
+  lesson) shift; cmd_lesson "$@" ;;
+  note) shift; cmd_note "$@" ;;
+  decide) shift; cmd_decide "$@" ;;
+  recall) shift; cmd_recall "$@" ;;
+  loop) shift; cmd_loop "$@" ;;
+  dash) cmd_dash ;;
+  save) shift; cmd_save "$@" ;;
+  selftest) cmd_selftest ;;
+  *) die "usage: os {boot|log|lesson|note|decide|recall|loop|dash|save|selftest}" ;;
+esac

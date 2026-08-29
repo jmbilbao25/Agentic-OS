@@ -118,6 +118,40 @@ What is done about it:
 
 None of this makes injection impossible. All of it makes the outcome bounded, visible and revertable. If you want a stronger guarantee, the honest one is to not give a web-exposed agent write access at all — drop the write tools from `TOOLS` in `server/mcp.py` and it becomes read-only.
 
+## Plugins — there is no marketplace
+
+Worth saying plainly, because the Settings UI implies otherwise. DSH has **no plugin store or marketplace**. The `Plugins` pane is `dsh-host-plugin-inventory`, whose own reference describes it as a *"read-only projection of the current Cordis Loader plugin state"* that "owns no cache, history, provenance model, event stream, or mutation path." It shows you what is loaded. It does not install anything.
+
+**You probably already have what you need.** This deployment composes **136 plugins**, including the shell, filesystem, editor, web-fetch, web-search, subagents, plan mode, skills, todo, jobs, goals and the Ralph loop. Check with:
+
+```sh
+dsh web --patch deploy/harness/jm-agentic-os.cordis.yml --dump-config \
+  | grep "^  name: '" | sort -u
+```
+
+**To add one**, `dsh plugin` forwards to pnpm inside the profile directory (`$DSH_HOME/profiles/web`, created on first boot):
+
+```sh
+export DSH_HOME=$HOME/.dsh-harness
+dsh plugin --profile web add <npm-package>
+```
+
+What happens next depends on the package, and dsh tells you which case you are in:
+
+- A package that declares `dsh.bundle` becomes a **profile layer automatically**.
+- Anything else installs as a plain dependency and is *not loaded*. dsh warns: `declares no dsh.bundle — installed as a plain dependency, not a profile layer`. To actually mount it, add a row to `$DSH_HOME/profiles/web/cordis.patch.yml` — a persistent user patch layer applied after every bundle:
+
+```yaml
+- insert:
+    - id: my-plugin
+      name: '<npm-package>'
+      config: {}
+```
+
+Then `sudo systemctl restart jm-harness`.
+
+**One recommendation against.** `@deepseek-ai/dsh-tool-cordis` with `@deepseek-ai/dsh-cordis-host-runner` gives the model self-inspection over the live plugin graph, and DSH's own example config says to "treat this deployment like shell access, not as a security boundary." On a box holding your vault and your API key, that undoes the sandbox described above. Install it on something disposable, not here.
+
 ## Commits pile up on the box — decide what happens to them
 
 Every write is a local commit. That is the provenance story, and on an always-on box it has a consequence worth deciding deliberately rather than discovering:

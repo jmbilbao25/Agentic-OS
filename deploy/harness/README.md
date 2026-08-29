@@ -118,6 +118,57 @@ What is done about it:
 
 None of this makes injection impossible. All of it makes the outcome bounded, visible and revertable. If you want a stronger guarantee, the honest one is to not give a web-exposed agent write access at all — drop the write tools from `TOOLS` in `server/mcp.py` and it becomes read-only.
 
+## Where to put things
+
+Everything the harness reads lives under two roots: `$DSH_HOME` (`~/.dsh-harness`) and the workspace (`~/harness-workspace`). Nothing here requires touching the repo.
+
+| To add | Put it in | Takes effect |
+|---|---|---|
+| **A skill** for the agent | `~/.dsh-harness/skills/<name>/SKILL.md` | next model step — the root is watched |
+| A skill only for one project | `~/harness-workspace/.dsh/skills/<name>/SKILL.md` | same |
+| **A plugin** | `dsh plugin --profile web add <pkg>` → `~/.dsh-harness/profiles/web/` | restart |
+| Mount a plugin that isn't a bundle | a row in `~/.dsh-harness/profiles/web/cordis.patch.yml` | restart |
+| **Model / provider** changes | `~/.dsh-harness/settings.yaml`, or the Models page | immediately, hot-reloaded |
+| **An agent preset** | `~/.dsh-harness/.agent-presets/<name>/` | restart |
+| A skill bundled with a preset | `~/.dsh-harness/.agent-presets/<name>/skills/<skill>/SKILL.md` | restart |
+
+### Skill roots, in the order DSH scans them
+
+Lower rank wins when two roots define the same skill name. `<projectRoot>` is the nearest ancestor containing `.git`, or the working directory when there is none — here that is `~/harness-workspace`.
+
+| Rank | Source | Path on this box | Writable by the agent |
+|---:|---|---|---|
+| 100 | `project-dsh` | `~/harness-workspace/.dsh/skills` | yes |
+| 200 | `project-agents` | `~/harness-workspace/.agents/skills` | yes |
+| 300 | `custom` | `~/Agentic-OS/config/skills` ← the OS's six | **no**, read-only |
+| 400 | `user-dsh` | `~/.dsh-harness/skills` | yes |
+| 500 | `user-agents` | `~/.agents/skills` | yes |
+
+Rank 300 is set by `customSkillDirs` in `jm-agentic-os.cordis.yml`, which is what makes the OS's skills the agent's skills. It is deliberately read-only to the harness process: the agent can *use* `taste` and `skill-forge`, and cannot rewrite them. Authoring goes to rank 400; promoting into rank 300 is a human step.
+
+**Skill file shape** — discovery is one level deep only, so `<root>/<name>/SKILL.md` or `<root>/<name>.md`. Nested `**/SKILL.md` is ignored.
+
+```yaml
+---
+name: my-skill        # kebab-case, and must equal the directory name
+description: What it does. Use when <the phrases a user would actually type>.
+---
+
+# My skill
+
+Body. Loaded only once the description matches, so put the trigger words in the
+description and the instructions here.
+```
+
+### Automations: not a DSH concept
+
+There is no directory that turns a file into a scheduled job. Two different things get called "automation" here:
+
+- **Agentic-OS automations** — `automations/<name>.py`, plus an entry in the allowlist in `server/app.py`, plus a `deploy/systemd/*.timer`. Three coupled places, all read-only to the agent, all requiring root for the timer. This is code that runs on a schedule with vault write access, so it stays a human change.
+- **`dsh-schedule`** — session-local reminders delivered as chat messages, fixed-interval, no cron, and not composed in this deployment. It is not a substitute for a timer.
+
+The closest thing the agent can create unaided is a **loop** in `brain/loops/`, which is a durable work ledger it can write over MCP and pick up in a later session.
+
 ## Plugins — no official marketplace, several community ones
 
 DSH ships **no** marketplace. The built-in `Plugins` pane is `dsh-host-plugin-inventory`, whose own reference calls it a *"read-only projection of the current Cordis Loader plugin state"* that "owns no cache, history, provenance model, event stream, or mutation path." It shows what is loaded; it installs nothing.

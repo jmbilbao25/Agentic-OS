@@ -178,10 +178,21 @@ def fuse(db, q: str, kw: List[Dict], sem: List[Dict]):
             if aff:
                 named[d["id"]] = aff
 
+        # An EXACT name match is a different intent from a topical one. Typing a
+        # document's whole name is navigation: you know what you want and you want
+        # it first. A partial match is a guess, and stays a gentle nudge.
+        #
+        # Without the split, "AGENTS.md" lost to a note that merely mentions the
+        # kernel — the kernel appeared only in the keyword pool while that note
+        # appeared in both, and RRF's two contributions beat one plus a 0.08
+        # nudge. Raising W_TITLE globally would have over-boosted every fuzzy
+        # match in order to fix one navigational case.
+        w_exact = getattr(config, "W_TITLE_EXACT", 0.45)
         for rowid, row in rows.items():
             aff = named.get(row["doc_id"])
-            if aff:
-                fused[rowid] += w_title * aff
+            if not aff:
+                continue
+            fused[rowid] += w_exact if aff >= 1.0 else w_title * aff
 
     return fused, named
 

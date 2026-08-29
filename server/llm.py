@@ -74,6 +74,21 @@ def _chain(model: Optional[str]) -> List[str]:
     return out or [""]
 
 
+def _batches(chain: List[str]) -> List[List[str]]:
+    """Group the fallback chain into what one request can carry.
+
+    OpenRouter routes server-side and accepts at most 3 models per request, so a
+    longer chain is sent as successive batches of 3 rather than being silently
+    truncated — previously `attempts = chain[:1]` meant anything past the third
+    model was configured, displayed, and never actually tried.
+
+    Every other provider takes one model per request.
+    """
+    if is_openrouter() and len(chain) > 1:
+        return [chain[i:i + 3] for i in range(0, len(chain), 3)]
+    return [[m] for m in chain]
+
+
 def _payload(messages, model, *, stream, temperature=None, max_tokens=None,
              chain=None):
     body = {
@@ -95,8 +110,13 @@ def _payload(messages, model, *, stream, temperature=None, max_tokens=None,
     if is_openrouter():
         # Server-side routing: OpenRouter walks the list itself, which is both
         # faster and cheaper than us retrying after a failed round trip.
+        #
+        # Belt and braces: _batches() already limits this to 3, but OpenRouter
+        # rejects a longer array outright with 400 "'models' array must have 3
+        # items or fewer" — a primary plus three fallbacks failed every request
+        # rather than degrading — so the cap is enforced here too.
         if chain and len(chain) > 1:
-            body["models"] = chain
+            body["models"] = chain[:3]
         body["usage"] = {"include": True}
     elif stream:
         body["stream_options"] = {"include_usage": True}
@@ -161,12 +181,13 @@ async def stream(messages: List[Dict], *, model: str = None,
     timeout = settings.get("LLM_TIMEOUT")
 
     # OpenRouter walks the chain itself, so one attempt is the whole chain there.
-    attempts = chain[:1] if (is_openrouter() and len(chain) > 1) else chain
+    attempts = _batches(chain)
     last_error = None
 
-    for attempt, mdl in enumerate(attempts):
+    for attempt, batch in enumerate(attempts):
+        mdl = batch[0]
         payload = _payload(messages, mdl, stream=True, temperature=temperature,
-                           max_tokens=max_tokens, chain=chain)
+                           max_tokens=max_tokens, chain=batch)
         produced = False
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
@@ -246,12 +267,13 @@ async def complete(messages: List[Dict], *, model: str = None,
 
     chain = _chain(model)
     url = "%s/chat/completions" % settings.get("LLM_BASE_URL")
-    attempts = chain[:1] if (is_openrouter() and len(chain) > 1) else chain
+    attempts = _batches(chain)
     last_error = None
 
-    for mdl in attempts:
+    for batch in attempts:
+        mdl = batch[0]
         payload = _payload(messages, mdl, stream=False, temperature=temperature,
-                           max_tokens=max_tokens, chain=chain)
+                           max_tokens=max_tokens, chain=batch)
         try:
             async with httpx.AsyncClient(timeout=settings.get("LLM_TIMEOUT")) as c:
                 r = await c.post(url, headers=_headers(), json=payload)

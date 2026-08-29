@@ -1,0 +1,28 @@
+[Unit]
+Description=AgentOS — capture AI signal into brain/raw/, then distil it
+Documentation=https://github.com/jmbilbao25/Agentic-OS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__DIR__
+EnvironmentFile=__DIR__/server/.env
+
+# Capture first. Six keyless feeds; a dead feed is reported, not fatal.
+ExecStart=__DIR__/.venv/bin/python -m automations.radar --json
+
+# Then distil. `-` prefix so a rate-limited model does not fail the whole unit —
+# the capture is the durable part and it already succeeded. Free-tier models 429
+# routinely, and a red unit for that would train you to ignore red units.
+ExecStart=-__DIR__/.venv/bin/python -m automations.distill
+
+# Reindex so what was just captured is immediately searchable. Otherwise the
+# radar runs, you search for what it found, and get nothing.
+ExecStart=__DIR__/.venv/bin/python -m server.index
+
+TimeoutStartSec=900
+MemoryMax=850M
+Nice=10
+IOSchedulingClass=idle

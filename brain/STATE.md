@@ -28,24 +28,29 @@ Promote by rewriting, never by moving. Supporting: `STATE.md`, `lessons.md`,
 - Model access is not transferable between vendors; keep the provider behind one
   env var. See [[Model Access Is Not Transferable]].
 
-## The stack on the server
-- Host: EC2 `t3.micro` + 30 GB gp3, ~$10/mo, inside the credit-based free tier.
-- Retrieval: SQLite FTS5 (BM25) + sqlite-vec, fused with RRF. Index is
-  disposable; markdown is truth. See [[Grep Beats Embeddings Here]].
-- Embeddings: quantised BGE-small, CPU-only, on-box. Inference: remote,
-  OpenAI-compatible; provider, model and fallback chain are live-editable in the UI.
+## The stack on the server — LIVE
+- `https://jm-agentic-os-13-218-239-165.sslip.io` (bare-IP host still valid).
+  EC2 `t3.micro` + 30 GB gp3, ~$10/mo. Reboot-tested; back in ~30s unattended.
+- Retrieval: FTS5 + sqlite-vec fused with RRF, exact-name matches weighted apart.
+  Index is disposable; markdown is truth. See [[Grep Beats Embeddings Here]].
+- Embeddings on-box (BGE-small, CPU). Inference remote and OpenAI-compatible;
+  model + fallback chain live-editable in the UI.
 - Auth: one username + one PBKDF2 password hash, per-address lockout. Mint with
-  `python -m server.passwd`. TLS via Tailscale Funnel.
+  `python -m server.passwd`. TLS: Caddy + Let's Encrypt on sslip.io — no domain,
+  no DNS account, automatic. Tailscale Funnel is the `TLS=tailscale` alternative.
+- Automations: `bin/os radar|research|distill|brief`, 6 keyless feeds, daily 06:15.
 - Why a server at all: [[Local Runtime Closes The Gaps]].
 
 ## Blocked on the user
-- Run `python -m server.passwd` and paste the three lines into `server/.env`.
-  An empty credential config denies everyone, including you.
-- Paste an OpenRouter key into Settings in the UI (or `server/.env`). Search works
-  without one; Ask and Gauntlet do not.
-- Run `deploy/launch-ec2.sh` from CloudShell, then `deploy/provision.sh` on the box.
+- **Rotate the EC2 keypair.** Its private key was pasted into a chat transcript,
+  and the SG still allows SSH from `0.0.0.0/0`. Narrow it to one address.
+- Billing alarm at $20/mo.
 - Install `config/kernel-global.md` at the harness's global scope so repo-less
   sessions still boot.
+
+## Watch out
+- A merged PR is a snapshot, not a subscription — verify with a tree diff.
+  See [[Merged Is Not Merged]].
 
 ## Recent decisions
 - [[2026-08-19 Steering as the boot loader]] — an always-included kernel file

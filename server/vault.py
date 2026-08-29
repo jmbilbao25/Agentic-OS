@@ -117,13 +117,24 @@ def load_system() -> List[Doc]:
         d = _read(skill, "skills", id_override="skills/%s" % skill.parent.name)
         d.ring = "skills"
         d.title = d.fm.get("name") or skill.parent.name
+        # A file-set skill's other files are progressive-disclosure *children* of
+        # it, not peers. Surfaced as their own documents they appeared on the map
+        # as separate nodes and in search as `config/ui`, `config/writing`,
+        # `config/code` — one skill looking like four unrelated things. Their
+        # content is folded into the skill so it stays searchable.
+        kids = sorted(p for p in skill.parent.glob("*.md") if p.name != "SKILL.md")
+        if kids:
+            d.fm["files"] = ", ".join(p.stem for p in kids)
+            d.body += "\n\n## Reference files\n\n" + "\n".join(
+                "### %s\n\n%s" % (p.name, _read(p, "skills").body) for p in kids)
         out.append(d)
 
-    for steer in sorted((root / "config").glob("**/*.md")):
-        if steer.name == "SKILL.md":
-            continue
-        d = _read(steer, "config",
-                  id_override="config/%s" % steer.stem)
+    # Steering and the portable kernel only — the top level of config/ plus
+    # config/steering/. Globbing `config/**/*.md` swept skill subdirectories back
+    # in, which is the bug above.
+    for steer in sorted(list((root / "config").glob("*.md"))
+                        + list((root / "config" / "steering").glob("*.md"))):
+        d = _read(steer, "config", id_override="config/%s" % steer.stem)
         d.ring = "skills"
         out.append(d)
 

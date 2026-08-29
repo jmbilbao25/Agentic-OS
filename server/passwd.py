@@ -57,10 +57,20 @@ def looks_hashed(value: str) -> bool:
 
 def main():
     import getpass
-    user = (sys.argv[1] if len(sys.argv) > 1 else "") or \
-        input("Username [admin]: ").strip() or "admin"
+    tty = sys.stdin.isatty()
 
-    if sys.stdin.isatty():
+    # Only prompt on a terminal. `input()` on a pipe consumed the first line —
+    # the password — as the username, and then hashed the second line, so
+    # `printf 'pw\npw' | python -m server.passwd` silently minted a credential
+    # whose username WAS the password.
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
+        user = sys.argv[1]
+    elif tty:
+        user = input("Username [admin]: ").strip() or "admin"
+    else:
+        user = "admin"
+
+    if tty:
         pw = getpass.getpass("Password: ")
         again = getpass.getpass("Again: ")
         if pw != again:
@@ -71,6 +81,11 @@ def main():
     if len(pw) < 10:
         sys.exit("Use at least 10 characters. This is the only lock on the door.")
 
+    # These are ENV VAR names, and they are not the attribute names. config.py
+    # does `AUTH_USER = os.getenv("AGENTOS_USER")`, so the variable in .env is
+    # AGENTOS_USER while the Python attribute is config.AUTH_USER. Reading
+    # auth.py alone makes the attribute look like the contract; it is not.
+    # The selfcheck below pins these to whatever config.py actually reads.
     print("\n# Paste into server/.env — and never commit that file.")
     print("AGENTOS_USER=%s" % user)
     print("AGENTOS_PASSWORD_HASH=%s" % hash_password(pw))
@@ -95,6 +110,24 @@ def _selfcheck():
     # a cheap-iteration hash still verifies: the count travels in the string
     cheap = hash_password("x", iterations=1000)
     assert verify("x", cheap) and "$1000$" in cheap
+
+    # The env var names this CLI prints must be the ones config.py actually reads
+    # with os.getenv. Nothing else enforces that: config exposes them under
+    # *different* attribute names (AGENTOS_USER -> config.AUTH_USER), so reading
+    # auth.py suggests a contract that does not exist, and getting it wrong
+    # produces a .env the app ignores — which locks the owner out of their own
+    # instance while every command reports success.
+    import inspect
+    import pathlib
+    import re
+    src = inspect.getsource(main)
+    cfg = (pathlib.Path(__file__).with_name("config.py")).read_text()
+    for attr in ("AUTH_USER", "AUTH_PASSWORD_HASH"):
+        m = re.search(r'^%s\s*=\s*os\.getenv\(\s*"([A-Z0-9_]+)"' % attr, cfg, re.M)
+        assert m, "config.py no longer reads %s from an env var" % attr
+        envvar = m.group(1)
+        assert 'print("%s=' % envvar in src, \
+            "passwd prints the wrong env var for %s: config reads %s" % (attr, envvar)
     print("passwd selfcheck OK")
 
 

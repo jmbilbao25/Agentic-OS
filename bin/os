@@ -35,7 +35,8 @@ cmd_boot() {
     echo "## $(basename "$f" .md)"; sed -n '5,40p' "$f"; echo
   done
   echo "--- VAULT ---"
-  echo "notes: $(find "$BRAIN/notes" -name '*.md' 2>/dev/null | wc -l)   decisions: $(find "$BRAIN/decisions" -name '*.md' 2>/dev/null | wc -l)   journal: $(find "$BRAIN/journal" -name '*.md' 2>/dev/null | wc -l)"
+  n() { find "$BRAIN/$1" -name '*.md' 2>/dev/null | wc -l | tr -d ' '; }
+  echo "raw: $(n raw)   wiki: $(n wiki)   output: $(n output)   decisions: $(n decisions)   journal: $(n journal)"
   echo "recall with: bin/os recall \"<term>\"    |    end session with: bin/os save \"<summary>\""
   echo "======================================================================="
 }
@@ -56,11 +57,33 @@ cmd_lesson() {
 
 cmd_note() {
   [ $# -ge 1 ] || die 'usage: os note "Title"'
-  mkdir -p "$BRAIN/notes"
-  local f="$BRAIN/notes/$*.md"
-  [ -f "$f" ] && { echo "exists (edit it, do not duplicate) → brain/notes/$*.md"; exit 0; }
+  mkdir -p "$BRAIN/wiki"
+  local f="$BRAIN/wiki/$*.md"
+  [ -f "$f" ] && { echo "exists (edit it, do not duplicate) → brain/wiki/$*.md"; exit 0; }
   printf -- '---\ncreated: %s\ntags: []\n---\n\n# %s\n\n\n\nRelated: \n' "$TODAY" "$*" > "$f"
-  echo "created → brain/notes/$*.md"
+  echo "created → brain/wiki/$*.md"
+}
+
+cmd_capture() {
+  [ $# -ge 1 ] || die 'usage: os capture "Title" [source-url]'
+  mkdir -p "$BRAIN/raw"
+  local title="$1"; shift
+  local src="${1:-}"
+  local f="$BRAIN/raw/$TODAY $title.md"
+  [ -f "$f" ] && { echo "exists → brain/raw/$TODAY $title.md"; exit 0; }
+  printf -- '---\ncaptured: %s\nsource: %s\nkind: scratch\n---\n\n# %s\n\n\n' \
+    "$TODAY" "$src" "$title" > "$f"
+  echo "captured → brain/raw/$TODAY $title.md  (paste unedited; distil into brain/wiki/ later)"
+}
+
+cmd_ship() {
+  [ $# -ge 1 ] || die 'usage: os ship "Title"'
+  mkdir -p "$BRAIN/output"
+  local f="$BRAIN/output/$*.md"
+  [ -f "$f" ] && { echo "exists (bump to v2 rather than overwrite) → brain/output/$*.md"; exit 0; }
+  printf -- '---\ncreated: %s\nstatus: draft\nchannel: \nshipped: \nurl: \n---\n\n# %s\n\n\n\n---\nDrew on: \n' \
+    "$TODAY" "$*" > "$f"
+  echo "created → brain/output/$*.md  (compose from brain/wiki/, then list what it drew on)"
 }
 
 cmd_decide() {
@@ -101,7 +124,11 @@ cmd_dash() { python3 "$PY" dash; }
 cmd_save() {
   cmd_dash
   local msg="${*:-brain: sync $(date -u '+%F %H:%MZ')}"
-  git add -A brain docs .kiro bin 2>/dev/null || true
+  git add -A brain docs bin config adapters AGENTS.md 2>/dev/null || true
+  # generated harness bindings, only if they exist
+  for b in CLAUDE.md GEMINI.md .kiro .claude .cursor .windsurf .github; do
+    [ -e "$b" ] && git add -A "$b" 2>/dev/null || true
+  done
   if git diff --cached --quiet; then echo "nothing to save"; return 0; fi
   git commit -q -m "brain: $msg"
   if git remote get-url origin >/dev/null 2>&1; then
@@ -119,11 +146,13 @@ case "${1:-boot}" in
   log) shift; cmd_log "$@" ;;
   lesson) shift; cmd_lesson "$@" ;;
   note) shift; cmd_note "$@" ;;
+  capture) shift; cmd_capture "$@" ;;
+  ship) shift; cmd_ship "$@" ;;
   decide) shift; cmd_decide "$@" ;;
   recall) shift; cmd_recall "$@" ;;
   loop) shift; cmd_loop "$@" ;;
   dash) cmd_dash ;;
   save) shift; cmd_save "$@" ;;
   selftest) cmd_selftest ;;
-  *) die "usage: os {boot|log|lesson|note|decide|recall|loop|dash|save|selftest}" ;;
+  *) die "usage: os {boot|log|lesson|note|capture|ship|decide|recall|loop|dash|save|selftest}" ;;
 esac

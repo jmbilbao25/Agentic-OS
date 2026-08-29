@@ -120,23 +120,38 @@ def cmd_loop_close(args):
     print(f"closed {args[0]}")
 
 
+def layer(name, reverse=False, limit=None):
+    """Every .md in a vault layer, newest-first when reverse=True."""
+    d = BRAIN / name
+    if not d.exists():
+        return []
+    files = sorted(d.glob("*.md"), reverse=reverse)
+    if limit:
+        files = files[:limit]
+    out = []
+    for f in files:
+        if f.name == "README.md":       # layer docs are not content
+            continue
+        text = f.read_text(encoding="utf-8")
+        out.append({"name": f.stem, "body": text, "fm": frontmatter(text),
+                    "links": sorted(set(l.strip() for l in WIKILINK.findall(text)))})
+    return out
+
+
 def collect():
     def read(p):
         return p.read_text(encoding="utf-8") if p.exists() else ""
-    notes = sorted((BRAIN / "notes").glob("*.md")) if (BRAIN / "notes").exists() else []
     return {
         "generated": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%MZ"),
         "state": read(BRAIN / "STATE.md"),
         "lessons": read(BRAIN / "lessons.md"),
         "loops": [{"name": f.stem, "status": fm.get("status", "open"),
                    "steps": steps(t), "body": t} for f, t, fm in loops()],
-        "journal": [{"name": f.stem, "body": f.read_text(encoding="utf-8")}
-                    for f in sorted((BRAIN / "journal").glob("*.md"), reverse=True)[:14]],
-        "notes": [{"name": f.stem, "body": f.read_text(encoding="utf-8"),
-                   "links": sorted(set(WIKILINK.findall(f.read_text(encoding="utf-8"))))}
-                  for f in notes],
-        "decisions": [{"name": f.stem, "body": f.read_text(encoding="utf-8")}
-                      for f in sorted((BRAIN / "decisions").glob("*.md"), reverse=True)],
+        "journal": layer("journal", reverse=True, limit=14),
+        "notes": layer("wiki"),
+        "raw": layer("raw", reverse=True, limit=40),
+        "output": layer("output", reverse=True),
+        "decisions": layer("decisions", reverse=True),
     }
 
 
@@ -183,7 +198,8 @@ const D = JSON.parse(document.getElementById('data').textContent);
 const md = s => marked.parse((s||'').replace(/^---[\\s\\S]*?\\n---\\n/, '')
   .replace(/\\[\\[([^\\]|]+)\\]\\]/g, (_,n)=>`<span class="wl" data-go="${n}">${n}</span>`));
 document.getElementById('meta').textContent =
-  `generated ${D.generated} · ${D.notes.length} notes · ${D.decisions.length} decisions · ` +
+  `generated ${D.generated} · ${D.notes.length} wiki · ${D.raw.length} raw · ` +
+  `${D.output.length} output · ${D.decisions.length} decisions · ` +
   `${D.loops.filter(l=>l.status==='open').length} open loops`;
 
 const views = {
@@ -203,9 +219,14 @@ const views = {
            ${n.links.length?`<p class="dim">links: ${n.links.map(l=>`<span class="wl" data-go="${l}">${l}</span>`).join(', ')}</p>`:''}
          </div>`).join('') + `</div>`;
   },
+  Output(){ return D.output.map(o=>card(o.name + statusOf(o), md(o.body))).join('')
+    || '<p class="dim">nothing shipped yet — bin/os ship "Title"</p>'; },
+  Raw(){ return D.raw.map(r=>`<details class="card"><summary>${r.name}</summary>${md(r.body)}</details>`).join('')
+    || '<p class="dim">no captures yet — bin/os capture "Title" [url]</p>'; },
   Decisions(){ return D.decisions.map(d=>card(d.name, md(d.body))).join('') || '<p class="dim">none</p>'; },
   Journal(){ return D.journal.map(j=>`<details class="card" open><summary>${j.name}</summary>${md(j.body)}</details>`).join('') || '<p class="dim">none</p>'; },
 };
+function statusOf(o){ const s=(o.fm||{}).status; return s?` <span class="dim">${s}</span>`:''; }
 function card(t,b){ return `<div class="card"><h3>${t}</h3>${b}</div>`; }
 function cssid(s){ return s.replace(/[^a-z0-9]/gi,'-').toLowerCase(); }
 function loopCard(l){
@@ -254,13 +275,36 @@ def cmd_selftest(_):
 
     for p in ["STATE.md", "lessons.md"]:
         check((BRAIN / p).exists(), f"missing brain/{p}")
-    check((ROOT / ".kiro/steering/00-kernel.md").exists(), "missing kernel steering file")
+    for d in ["raw", "wiki", "output"]:
+        check((BRAIN / d).is_dir(), f"missing vault layer brain/{d}/")
 
-    kernel = (ROOT / ".kiro/steering/00-kernel.md").read_text(encoding="utf-8")
-    check(kernel.startswith("---\ninclusion: always"),
-          "kernel must start with 'inclusion: always' frontmatter or it won't load every session")
+    # The kernel is harness-neutral and lives at the repo root.
+    kernel_path = ROOT / "AGENTS.md"
+    check(kernel_path.exists(), "missing AGENTS.md — the kernel every harness binds to")
+    kernel = kernel_path.read_text(encoding="utf-8") if kernel_path.exists() else ""
+    check("bin/os boot" in kernel, "AGENTS.md must tell the agent to run 'bin/os boot'")
+    check("bin/os save" in kernel, "AGENTS.md must tell the agent to run 'bin/os save'")
 
-    for skill in (ROOT / ".kiro/skills").glob("*/SKILL.md"):
+    # Generated harness bindings must still match the kernel. Drift here means a
+    # harness is booting stale rules; the fix is always adapters/install.sh.
+    BINDINGS = ["CLAUDE.md", "GEMINI.md", ".kiro/steering/00-kernel.md",
+                ".cursor/rules/agentos.mdc", ".github/copilot-instructions.md",
+                ".windsurf/rules/agentos.md"]
+    bound = 0
+    for rel in BINDINGS:
+        p = ROOT / rel
+        if not p.exists():
+            continue
+        bound += 1
+        body = p.read_text(encoding="utf-8")
+        check(body.rstrip().endswith(kernel.rstrip()),
+              f"{rel}: drifted from AGENTS.md — re-run adapters/install.sh")
+    check(bound > 0, "no harness bindings installed — run adapters/install.sh")
+
+    # Skills live in portable config/, not in any harness directory.
+    skills = list((ROOT / "config/skills").glob("*/SKILL.md"))
+    check(bool(skills), "no skills found in config/skills/*/SKILL.md")
+    for skill in skills:
         fm = frontmatter(skill.read_text(encoding="utf-8"))
         check(fm.get("name") == skill.parent.name,
               f"{skill}: frontmatter name '{fm.get('name')}' != folder '{skill.parent.name}'")
@@ -273,9 +317,13 @@ def cmd_selftest(_):
         check(fm.get("status") in ("open", "closed"), f"{f.name}: status must be open|closed")
         check(bool(steps(text)), f"{f.name}: no '- [ ]' steps — a loop without steps can't resume")
 
-    names = {p.stem for p in (BRAIN / "notes").glob("*.md")} if (BRAIN / "notes").exists() else set()
-    names |= {p.stem for p in (BRAIN / "decisions").glob("*.md")} if (BRAIN / "decisions").exists() else set()
-    for p in list((BRAIN / "notes").glob("*.md")) + [BRAIN / "STATE.md"]:
+    names = set()
+    for d in ("wiki", "decisions", "output"):
+        if (BRAIN / d).exists():
+            names |= {p.stem for p in (BRAIN / d).glob("*.md") if p.name != "README.md"}
+    targets = [p for p in (BRAIN / "wiki").glob("*.md") if p.name != "README.md"]
+    targets += [BRAIN / "STATE.md"] + sorted((BRAIN / "loops").glob("*.md"))
+    for p in targets:
         # strip fenced blocks and inline code first: notes legitimately discuss the
         # `[[wikilink]]` syntax itself, and that is not a broken link.
         prose = re.sub(r"`[^`]*`", "", re.sub(r"```.*?```", "", p.read_text(encoding="utf-8"), flags=re.S))

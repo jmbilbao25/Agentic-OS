@@ -1,136 +1,161 @@
-# AgentOS — a persistent agentic OS that runs inside Kiro
+# AgentOS — a persistent agentic OS with a visual second brain
 
-A second brain, skills-as-programs, and file-backed loops that survive every
-session boundary. Plain markdown, stdlib Python, one bash script. No database, no
-daemon, no plugin.
+Give any AI coding agent a memory that survives the session, a vault you can read in
+Obsidian, and a web UI that turns the whole thing into something you can actually look
+at.
 
-**It works because the repo is the disk.** Kiro Web tears its sandbox down after
-a task, so anything not committed is gone. AgentOS puts memory in the repo, boots
-it with one command, and pushes it back before the session ends.
+**Model-agnostic. Harness-agnostic. Vendor-agnostic.** The kernel is one markdown file;
+bindings for Claude Code, Kiro, Cursor, Copilot, Windsurf, Gemini CLI and the
+`AGENTS.md` standard are generated from it. Inference sits behind one environment
+variable, so OpenRouter, OpenAI, Anthropic, or a local `ollama` are a URL change apart.
+
+**It works because the repo is the disk.** Agent sandboxes are ephemeral and their
+filesystems are not storage. Git is. Every durable thought is a commit.
 
 ```
-.kiro/steering/00-kernel.md   kernel — inclusion: always, boots the OS every session
-.kiro/steering/10-*.md        vault conventions, loaded on demand (inclusion: auto)
-.kiro/skills/*/SKILL.md       programs — recall/write-back, loop engineering
-.kiro/hooks/agentos-boot.json automatic boot on IDE/CLI (Web ignores hooks)
-bin/os                        the runtime: boot, save, loop, recall, dash, selftest
-bin/osutil.py                 parsing, dashboard, self-check (stdlib only)
-brain/                        the vault — open this folder in Obsidian
-docs/index.html               generated dashboard (GitHub Pages)
+AGENTS.md            the kernel — small, imperative, harness-neutral
+bin/os               the runtime — boot, capture, recall, loops, save
+config/              portable steering + skills, plus the global kernel
+adapters/install.sh  generates per-harness bindings from AGENTS.md
+brain/               the vault — raw → wiki → output, plus loops and journal
+server/              the visual second brain: hybrid search, RAG, orbit UI
+deploy/              always-on provisioning for a $10/mo box
+docs/index.html      generated static dashboard (GitHub Pages)
 ```
+
+## The ARMS model
+
+Four parts. This repo implements all four without depending on any one vendor.
+
+| | Part | Where it lives |
+|---|---|---|
+| **A** | Applications — what the agent reaches | `server/` micro-app + any MCP/CLI/API your harness has |
+| **R** | Routines — scheduled work | `systemd` timers in `deploy/` |
+| **M** | Memory — workspace and context | `brain/` + router files + the orbit UI |
+| **S** | Skills — SOPs as commands | `config/skills/`, bound into every harness |
+
+## Quickstart
+
+```bash
+git clone https://github.com/jmbilbao25/Agentic-OS.git
+cd Agentic-OS
+adapters/install.sh          # bind to whatever harnesses you have
+bash bin/os boot             # load working memory
+bash bin/os selftest         # verify the vault is well-formed
+```
+
+Then tell your agent: *run `bash bin/os boot` first thing every session.* That single
+habit is the whole system.
+
+### Bind it to your agent
+
+```bash
+adapters/install.sh --list   # what's bound
+adapters/install.sh --all    # bind everything
+adapters/install.sh cursor   # bind one
+```
+
+Bindings are **generated and committed** — a harness that clones the repo has to find
+its config already there. Never hand-edit one; edit `AGENTS.md` and re-run. `bin/os
+selftest` fails if a binding drifts.
+
+### Make it follow you into every repo
+
+Install `config/kernel-global.md` at your harness's user/global scope. It clones the
+brain as a sidecar and boots it, so even a session bound to no repository has memory.
+That file is self-bootstrapping on purpose — see `brain/wiki/Binding Beats Building.md`
+for the postmortem that forced it.
 
 ## The vault
 
-| Layer | Path | Lifetime |
+Three layers, and the boundaries are the point:
+
+| Layer | Holds | Quality bar |
 |---|---|---|
-| Working memory | `brain/STATE.md` | rewritten constantly, loaded every boot |
-| Episodic | `brain/journal/YYYY-MM-DD.md` | append-only, never edited |
-| Semantic | `brain/notes/*.md` | permanent, rewritten in place, `[[wikilinked]]` |
-| Decisions | `brain/decisions/*.md` | permanent, superseded not deleted |
-| Lessons | `brain/lessons.md` | activation-based, pruned when wrong |
-| Loops | `brain/loops/*.md` | ledgers with checkboxes, archived when closed |
+| `brain/raw/` | unprocessed capture — clippings, transcripts, dumps | none; capture beats curation |
+| `brain/wiki/` | atomic wikilinked notes, one idea each | you can state it in a sentence |
+| `brain/output/` | shipped artifacts | publishable |
 
-Only `STATE.md` is loaded every session. Everything else is recalled on demand
-with grep. That's progressive disclosure applied to memory instead of to skills.
+Promote by **rewriting**, never by moving. A raw capture dragged into `wiki/` unedited is
+still raw, just mislabelled. Supporting files: `STATE.md` (working memory, ~60 line
+ceiling), `lessons.md` (activation-based corrections), `journal/` (append-only),
+`decisions/` (one tradeoff each), `loops/` (task ledgers).
 
-## Setup
-
-**1. Use it as your brain repo.** Point a Kiro Web session at this repo and say
-anything. The kernel boots it. Done.
-
-**2. Drop it into an existing project** so the agent remembers *that* codebase:
-
-```bash
-git clone https://github.com/jmbilbao25/Agentic-OS /tmp/agentic-os
-cp -r /tmp/agentic-os/{.kiro,bin,brain} your-project/
-cd your-project && bash bin/os selftest && bash bin/os boot
-```
-
-Then empty `brain/STATE.md` down to the headings and let it fill up as you work.
-
-**3. Make it follow you into every repo.** In Kiro Web open
-**Settings → Cloud configuration** and add `00-kernel.md` and the two skills as
-personal steering/skills. They then load in sandboxes for repos that don't
-contain them. (Personal `~/.kiro/` files are not read on Web — cloud config is
-the mechanism.)
-
-## Obsidian
-
-`brain/` is already a valid vault — no plugin needed to read it.
-
-1. Clone the repo locally.
-2. Obsidian → *Open folder as vault* → select `brain/`.
-3. Graph view, backlinks, and `[[links]]` work immediately.
-4. Two-way sync: install **Obsidian Git** and enable commit-and-sync. Your notes
-   and the agent's notes land in the same history.
-
-The agent edits the vault from the sandbox and pushes; you pull in Obsidian. Both
-sides are editing plain files, so conflicts are ordinary git conflicts.
-
-## Dashboard
-
-`bin/os dash` regenerates `docs/index.html` — a single self-contained file with
-working memory, loop progress bars, searchable notes, clickable wikilinks, and the
-journal. `bin/os save` runs it automatically.
-
-To view it: **Settings → Pages → deploy from `main` / `docs`**, then open
-`https://<you>.github.io/Agentic-OS/`. Inside Kiro Web you can also read it in
-the read-only file explorer.
+It is a plain Obsidian vault. Clone it, open `brain/`, and the graph works with no
+plugins.
 
 ## Commands
 
+```bash
+bin/os boot                     # working memory + open loops + lessons
+bin/os capture "Title" [url]    # → brain/raw/
+bin/os note "Title"             # → brain/wiki/
+bin/os ship "Title"             # → brain/output/
+bin/os log "what happened"      # → brain/journal/<today>.md
+bin/os lesson "When X → do Y."  # → brain/lessons.md
+bin/os decide "Title"           # → brain/decisions/
+bin/os recall "term"            # grep the vault
+bin/os loop new|next|done|close|status
+bin/os dash                     # regenerate docs/index.html
+bin/os save "summary"           # dash + commit + push
+bin/os selftest                 # vault well-formed? bindings in sync?
 ```
-bin/os boot                    load memory + open loops + lessons  (first call, every session)
-bin/os save "summary"          dash + commit + push                (last call, every session)
-bin/os recall "term"           grep the vault, grouped output
-bin/os log "what happened"     append to today's journal
-bin/os lesson "When X → do Y." add an activation-based lesson
-bin/os note "Title"            new atomic note
-bin/os decide "Title"          new decision record with a tradeoff section
-bin/os loop new|next|done|status|close
-bin/os dash                    regenerate the dashboard
-bin/os selftest                verify the vault is well-formed
-```
 
-`selftest` checks the things that silently break the OS: kernel frontmatter is
-`inclusion: always`, skill `name` matches its folder, descriptions within limits,
-`STATE.md` under its line budget, loop ledgers parseable, no broken wikilinks.
+## The visual second brain
 
-## Loops
+`server/` is a small FastAPI app that renders the vault as an interactive orbit map —
+concentric ARMS rings, category clusters, `/` to fuzzy-search, click to preview — and
+answers questions over it with citations.
 
-Multi-session work goes in a ledger, not a conversation:
+Retrieval is **hybrid**: SQLite FTS5 (BM25) for keywords, `sqlite-vec` for semantics,
+fused with Reciprocal Rank Fusion. Embeddings are a quantised MiniLM running on CPU.
+No Postgres, no vector service, no daemon — the index is a single file, rebuilt from
+markdown and thrown away whenever you like.
 
 ```bash
-bin/os loop new refactor-auth      # write Goal, Done when, and Steps
-bin/os loop next refactor-auth     # prints the fixed prompt + next unchecked step
-# ... do exactly that step, append findings to # Notes ...
-bin/os loop done refactor-auth 2
-bin/os save "loop refactor-auth step 2"
+cd server
+cp .env.example .env      # add Google OAuth + OPENROUTER_API_KEY
+pip install -r requirements.txt
+python -m server.index    # build the index
+uvicorn server.app:app --port 8000
 ```
 
-Any later session — different tab, different device, zero shared transcript —
-resumes from `bin/os loop next`. The ledger is the loop counter; the session is
-the loop body. See `brain/notes/Ralph Loop.md`.
+Auth is Google OAuth with a single-account allowlist. See `server/README.md`.
 
-## What this cannot do on Kiro Web
+## Always-on
 
-Stated plainly, because every workaround below is a real constraint, not a
-preference:
+`deploy/` provisions an EC2 `t3.micro` (~$10/mo) with swap, a venv, systemd units for
+the app and a reindex timer, and TLS via Tailscale Funnel — no domain purchase, no
+inbound port. Inference stays remote on purpose: a box that can hold a useful model
+costs ~10x a box that can hold an index, and is worse at it.
 
-- **No hooks.** Boot is instructed by steering, not enforced by the platform. The
-  hook in `.kiro/hooks/` covers IDE and CLI only.
-- **No custom agents.** No per-role models or tool restrictions on Web. Roles are
-  skills, not separate agents.
-- **No cron, no daemon, no self-restart.** The sandbox dies with the task, so an
-  unattended overnight loop needs an outside driver (GitHub Actions, or Kiro CLI
-  locally in a `while` loop). Inside Web, one session advances one step.
-- **No repo `mcp.json`.** Configure MCP in Settings → Agent.
-- **Sessions expire after 90 days.** Commits don't. Push.
+```bash
+deploy/launch-ec2.sh      # from AWS CloudShell
+# then, on the box:
+deploy/provision.sh
+```
 
-## Design choices worth arguing with
+See `deploy/README.md` and the `deploy-always-on` loop ledger.
 
-Grep instead of a vector store, markdown instead of a database, one script instead
-of a framework. Reasoning is in `brain/notes/` and `brain/decisions/` — the vault
-documents its own architecture, which is the point.
+## What this deliberately does not do
 
-Findings and sources behind the design: [RESEARCH.md](RESEARCH.md).
+- **Enforce boot on hosted harnesses.** No session hooks there, so boot is *instructed*
+  by an always-included kernel. Local harnesses get a real hook via `adapters/`.
+- **Run inference locally on the small box.** 1 GB RAM holds an index, not a model.
+- **Hold state anywhere but git.** Every database here is a cache. Delete
+  `server/index.db` and it rebuilds; delete `brain/` and you have lost the OS.
+- **Ship a vendor's memory feature.** Those are not diffable, not reviewable in a PR,
+  and not readable in five years without the software that wrote them.
+
+## Why it's built this way
+
+The reasoning lives in the vault, which is the best demonstration that it works:
+
+- `brain/wiki/Git Is The Disk.md` — why storage is a git remote
+- `brain/wiki/Harness Capability Matrix.md` — how to audit a new harness
+- `brain/wiki/Binding Beats Building.md` — a config OS is only as persistent as its delivery
+- `brain/wiki/Grep Beats Embeddings Here.md` — keyword-first, and when that changed
+- `brain/wiki/Model Access Is Not Transferable.md` — why the provider is one env var
+- `brain/wiki/Steering as Boot Loader.md` — always-on instructions beat one-shot hooks
+- `brain/wiki/Ralph Loop.md` — the loop pattern this borrows from
+- `RESEARCH.md` — the findings behind the design

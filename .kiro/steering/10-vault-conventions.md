@@ -1,1 +1,1 @@
-../../cloud-config/steering/10-vault-conventions.md
+../../config/steering/10-vault-conventions.md

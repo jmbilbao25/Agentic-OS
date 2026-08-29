@@ -104,6 +104,41 @@ What is done about it:
 
 None of this makes injection impossible. All of it makes the outcome bounded, visible and revertable. If you want a stronger guarantee, the honest one is to not give a web-exposed agent write access at all — drop the write tools from `TOOLS` in `server/mcp.py` and it becomes read-only.
 
+## Commits pile up on the box — decide what happens to them
+
+Every write is a local commit. That is the provenance story, and on an always-on box it has a consequence worth deciding deliberately rather than discovering:
+
+`agentos-sync.service` runs `git pull --ff-only`. A box that cannot push accumulates harness commits, diverges from `origin`, and from then on **every sync fails** — quietly, because the timer's failure is not visible in the UI. The vault keeps working; it just stops pulling and stops reindexing on schedule.
+
+A default EC2 checkout cloned over HTTPS has no push credential, so this is the likely state. Check:
+
+```sh
+git -C ~/Agentic-OS push --dry-run origin HEAD
+# fatal: could not read Username for 'https://github.com'  <- diverges silently
+```
+
+Two honest resolutions. Pick one:
+
+**Let the box push** — the vault genuinely becomes durable, and `bin/os save` starts working too (it has the same dependency).
+
+```sh
+# a fine-grained PAT with Contents:write on this repo only
+git -C ~/Agentic-OS remote set-url origin \
+  https://<user>:<token>@github.com/<user>/<repo>.git
+chmod 600 ~/Agentic-OS/.git/config     # the token is now in there
+```
+
+**Or keep the box read-only against `origin`** and accept that harness writes live only on the box until you collect them by hand. If you choose this, make the sync tolerate divergence, or it will keep failing:
+
+```sh
+sudo systemctl edit agentos-sync.service
+# [Service]
+# ExecStart=
+# ExecStart=/usr/bin/git pull --rebase --autostash --quiet
+```
+
+There is no third option where commits accumulate and `--ff-only` keeps working. Choosing nothing is choosing the second one, with a broken timer.
+
 ## Troubleshooting
 
 | Symptom | Cause |
@@ -115,3 +150,6 @@ None of this makes injection impossible. All of it makes the outcome bounded, vi
 | Harness OOM-killed | Both units oversubscribe a 1 GB box. Lower `MemoryHigh` in `agentos.service` to 420M. |
 | Writes succeed, search misses them | Reindex failed after the write. The tool result says so in `searchable`. Check `journalctl -u agentos`. |
 | Harness vanished after re-provisioning | `provision.sh` rewrites `/etc/caddy/Caddyfile` from `deploy/Caddyfile` alone. Re-run `install-harness.sh`. |
+| `status=127` / `env: 'node': No such file or directory` | The unit's `PATH` has no nvm directory. Fixed in the shipped unit via `Environment=PATH=`; if you hand-edited it, put the node bin dir back. |
+| Sync timer stopped, vault otherwise fine | Harness commits diverged the box from `origin` and `git pull --ff-only` now fails. See the section above. |
+| Rate-limited every turn | You are on `glm-5.2:free`. Switch to `glm-5.3-flash` in the Models page. |

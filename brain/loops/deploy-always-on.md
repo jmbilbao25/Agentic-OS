@@ -31,8 +31,8 @@ at least once; and the whole thing comes back by itself after `sudo reboot`.
 - [x] load the orbit UI in a browser, search with `/`, open a note, confirm the preview renders
 - [x] `sudo reboot`, then confirm it comes back with no manual intervention
 - [x] `agentos-sync.timer` enabled — confirm an unattended git pull + reindex
-- [ ] put `OPENROUTER_API_KEY` in `server/.env` (openrouter.ai/keys) and restart
-- [ ] ask one RAG question, verify every citation points at a file that actually exists
+- [x] put `OPENROUTER_API_KEY` in `server/.env` (openrouter.ai/keys) and restart
+- [x] ask one RAG question, verify every citation points at a file that actually exists
 - [ ] rotate the EC2 keypair and narrow the SSH source from 0.0.0.0/0 to one IP
 - [ ] set a billing alarm at $20/mo and record the real observed cost in Notes
 

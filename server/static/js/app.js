@@ -7,6 +7,7 @@
 
 import { get, post, AuthLost } from './api.js';
 import { Orbit, RINGS } from './orbit.js';
+import { LAYOUTS } from './layouts.js';
 import { Palette } from './palette.js';
 import { ModelPicker, setCatalogue } from './models.js';
 import { DocView, AskView } from './views.js';
@@ -71,12 +72,14 @@ function openTab(name) {
 
   if (name === 'settings') settings.load().catch(handle);
   if (name === 'ask') setTimeout(() => askView.focus(), 60);
+  syncChrome();
 }
 
 function closeDock() {
   dock.classList.remove('open');
   activeTab = null;
   orbit.deselect();
+  syncChrome();
   releaseFocus();
 }
 
@@ -118,6 +121,7 @@ function releaseFocus() {
     grip.classList.remove('dragging');
     localStorage.setItem('agentos.dockWidth',
       String(Math.round(dock.getBoundingClientRect().width)));
+    syncChrome();
   });
 })();
 
@@ -201,6 +205,77 @@ function renderRings() {
     const ring = RINGS.find((r) => r.id === b.dataset.ring);
     if (ring) b.style.color = ring.color;
   });
+}
+
+/* Layout switcher.
+ *
+ * The chosen layout is persisted, because it is a way of working rather than a
+ * momentary action: someone who thinks in a ranked list should not be handed the
+ * rings again on every visit. */
+const LAYOUT_KEY = 'agentos.layout';
+
+function renderLayouts() {
+  $('#layouts').innerHTML = LAYOUTS.map((l, i) => `
+    <button class="layout-btn" data-layout="${l.id}"
+            aria-pressed="${String(l.id === orbit.layout)}"
+            title="${esc(l.label)} — ${esc(l.hint)} (${i + 1})">
+      <svg class="i" aria-hidden="true"><use href="#i-lay-${l.id}"/></svg>
+      <span class="lbl">${esc(l.label)}</span>
+    </button>`).join('');
+  // Rank is the one layout whose meaning depends on state outside itself, so it
+  // says what it is currently ordered by instead of describing itself in general.
+  const l = LAYOUTS.find((x) => x.id === orbit.layout);
+  const n = orbit.ranking.length;
+  $('#layout-hint').textContent = orbit.layout !== 'rank' ? (l?.hint || '')
+    : n ? `${n} match${n === 1 ? '' : 'es'}, best first`
+        : 'press / and search — the line follows the results';
+}
+
+function setLayout(id, { animate = true } = {}) {
+  if (orbit.setLayout(id, { animate }) !== id) return;
+  localStorage.setItem(LAYOUT_KEY, id);
+  renderLayouts();
+}
+
+/* Tell the map what is sitting on top of it.
+ *
+ * The canvas fills the window and the rail and topbar float over its left and top
+ * edges. The rings never cared — a circle centred in the window looks centred
+ * whatever overlaps it — but a horizontal line does: centred in the window it runs
+ * straight under the rail, and the first version of Rank lost its five best
+ * results behind the legend. Measured from the DOM rather than hardcoded, because
+ * the rail is hidden on narrow viewports and the dock is resizable.
+ *
+ * The dock is deliberately excluded. It overlays the right-hand side, but
+ * reflowing the entire map every time you open a note would be far more
+ * disorienting than a few dots being covered while you read. */
+function syncChrome() {
+  const gap = 16;
+  const pad = 6;
+  const box = (sel) => {
+    const el = $(sel);
+    if (!el || el.hidden) return null;
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 ? r : null;
+  };
+  const rail = box('.rail');
+  const bar = box('header');
+
+  orbit.setInsets({
+    left: rail ? rail.right + gap : gap,
+    right: gap,
+    top: bar ? bar.bottom + gap : gap,
+    bottom: gap,
+  });
+
+  // Labels get the exact shapes rather than the per-edge insets, so the empty
+  // corner above the rail stays usable. The dock is included here but not in the
+  // insets: hiding a label behind it is a small loss, reflowing the whole map
+  // every time a note opens is a large one.
+  const open = dock.classList.contains('open') ? box('#dock') : null;
+  orbit.setObstacles([rail, bar, open].filter(Boolean).map((r) => ({
+    x: r.left - pad, y: r.top - pad, w: r.width + pad * 2, h: r.height + pad * 2,
+  })));
 }
 
 function syncRingButtons() {
@@ -311,6 +386,7 @@ async function loadGraph() {
   state.stats = graph.stats;
   orbit.setData(graph.nodes, graph.edges);
   renderRings();
+  renderLayouts();
   syncRingButtons();
   if (graph.missing.length) {
     console.info('Unresolved wikilinks:', graph.missing);
@@ -354,9 +430,18 @@ async function loadModels(force = false) {
 
 async function boot() {
   try {
+    // Before the graph loads, so the first frame is already in the right shape.
+    const saved = localStorage.getItem(LAYOUT_KEY);
+    if (saved) orbit.setLayout(saved, { animate: false });
     await loadGraph();
+    syncChrome();
     orbit.start();
     setupScrubber();
+    // The rail's height depends on the ring counts, which only exist after the
+    // graph loads, and on fonts, which land later still.
+    requestAnimationFrame(syncChrome);
+    window.addEventListener('resize', syncChrome);
+    if (document.fonts?.ready) document.fonts.ready.then(syncChrome);
     await refreshStatus();
     loadModels().catch(() => {});
   } catch (e) {
@@ -382,14 +467,18 @@ const commands = () => [
     run: guard(() => doReindex(false)) },
   { label: 'Full reindex', hint: 'Rebuild every chunk and vector from scratch',
     run: guard(() => doReindex(true)) },
+  ...LAYOUTS.map((l, i) => ({
+    label: `Layout: ${l.label}`, hint: l.hint, keys: String(i + 1),
+    run: () => setLayout(l.id),
+  })),
   { label: 'Reset the view', hint: 'Recentre and unfreeze the map', keys: '0',
     run: () => { orbit.reset(); closeDock(); } },
   { label: 'Show every ring', hint: 'Undo any ring isolation',
     run: () => { orbit.showAllRings(); syncRingButtons(); } },
-  { label: 'Clear filters', hint: 'Drop the tag, layer and recency filters',
+  { label: 'Clear filters', hint: 'Drop the tag, layer, recency and search order',
     run: () => { setFilter(null); $('#scrub').value = 100;
                  orbit.setSince(0); $('#scrub-label').textContent = 'everything';
-                 updateCounts(); } },
+                 orbit.clearHighlight(); renderLayouts(); updateCounts(); } },
   { label: 'Copy vault statistics', hint: 'Counts as JSON',
     run: () => navigator.clipboard?.writeText(JSON.stringify(state.stats, null, 2))
       .then(() => toast('Statistics copied'))
@@ -421,8 +510,19 @@ palette.paint = (rows, q, mode) => {
   } else {
     orbit.clearHighlight();
   }
+  renderLayouts();      // the Rank hint reports the live match count
 };
-palette.onClose = () => { orbit.clearHighlight(); releaseFocus(); };
+
+/* Closing the finder drops the highlight — except in Rank, where the result order
+ * is not decoration on top of the map, it *is* the map. Clearing it there would
+ * re-sort every node back to alphabetical the instant you stopped typing, which
+ * makes the layout unusable for the thing it exists to do. Emptying the search
+ * box still clears it, via the paint hook above. */
+palette.onClose = () => {
+  if (orbit.layout !== 'rank') orbit.clearHighlight();
+  renderLayouts();
+  releaseFocus();
+};
 
 /* ------------------------------------------------------------------ actions */
 
@@ -447,10 +547,13 @@ async function doReindex(full) {
 /* ------------------------------------------------------------------- events */
 
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-act],[data-tab],[data-ring],[data-dismiss]');
+  const t = e.target.closest(
+    '[data-act],[data-tab],[data-ring],[data-layout],[data-dismiss]');
   if (!t) return;
 
   if (t.dataset.tab) return openTab(t.dataset.tab);
+
+  if (t.dataset.layout) return setLayout(t.dataset.layout);
 
   if (t.dataset.ring) {
     if (e.shiftKey) orbit.soloRing(t.dataset.ring);
@@ -558,6 +661,13 @@ document.addEventListener('keydown', (e) => {
     case 'g': case 'G': openTab('gauntlet'); break;
     case ',': openTab('settings'); break;
     case '0': orbit.reset(); break;
+    // 1-4 select a layout. Adjacent to 0 (reset the view), which is the family
+    // these belong to — everything about how the map is arranged, on one row.
+    case '1': case '2': case '3': case '4': {
+      const l = LAYOUTS[Number(e.key) - 1];
+      if (l) setLayout(l.id);
+      break;
+    }
     case '+': case '=': orbit.zoom(1.25); break;
     case '-': orbit.zoom(1 / 1.25); break;
     case 'r': case 'R': guard(() => doReindex(false))(); break;

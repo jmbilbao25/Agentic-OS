@@ -322,6 +322,31 @@ kbd {
 .ring-btn[aria-pressed="false"] .sw { box-shadow: none; }
 .ring-btn.solo { background: rgba(255, 138, 61, .1); }
 
+/* Layout switcher. A 2x2 of arrangements, each labelled with a miniature of the
+   shape it produces — picking a view should not require reading four words and
+   imagining the result. */
+.layouts { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; }
+.layout-btn {
+  display: flex; align-items: center; gap: 5px;
+  background: none; border: 1px solid transparent; border-radius: var(--r-sm);
+  padding: 5px 6px; cursor: pointer;
+  font: 500 10.5px/1 var(--sans); letter-spacing: .05em;
+  color: var(--fg-2); text-align: left;
+  transition: background var(--fast) var(--ease), color var(--fast) var(--ease),
+              border-color var(--fast) var(--ease);
+}
+.layout-btn .i { width: 13px; height: 13px; stroke-width: 1.4; }
+.layout-btn:hover { background: var(--bg-3); color: var(--fg-0); }
+.layout-btn[aria-pressed="true"] {
+  background: rgba(255, 138, 61, .13);
+  border-color: rgba(255, 138, 61, .36);
+  color: var(--fg-0);
+}
+.layout-hint {
+  margin: var(--s2) 0 0; font-size: 10px; line-height: 1.35;
+  color: var(--fg-2); min-height: 1.35em;
+}
+
 /* Recency scrubber: drag time backwards and watch the vault empty out. */
 .scrub { display: flex; flex-direction: column; gap: 6px; }
 .scrub-row {

@@ -519,7 +519,8 @@ palette.paint = (rows, q, mode) => {
  * makes the layout unusable for the thing it exists to do. Emptying the search
  * box still clears it, via the paint hook above. */
 palette.onClose = () => {
-  if (orbit.layout !== 'rank') orbit.clearHighlight();
+  if (orbit.layout === 'rank') orbit.clearPulse();
+  else orbit.clearHighlight();
   renderLayouts();
   releaseFocus();
 };

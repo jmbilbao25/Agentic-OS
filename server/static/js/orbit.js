@@ -344,6 +344,16 @@ export class Orbit {
     if (this.layout === 'rank') this.relayout();
   }
 
+  /** Drop the transient flash but keep which nodes matched, and their order.
+   *
+   * The pulse is a "look here" that fades over about five seconds, and while it
+   * lasts a hit is drawn white. That was fine when the highlight died with the
+   * palette; now that a ranked line outlives it, the pulse outlives it too, and
+   * the top results sat as white dots with neither their zone colour nor the ring
+   * that marks a hit — the exact thing the white-for-everything rule was written
+   * to prevent. Closing the finder settles the map without unsorting it. */
+  clearPulse() { this.pulse.clear(); }
+
   /* --------------------------------------------------------------- camera */
 
   freeze(on) {

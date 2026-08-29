@@ -12,7 +12,7 @@ EnvironmentFile=__DIR__/server/.env
 
 # Bound to loopback on purpose. Tailscale Funnel terminates TLS and forwards
 # here, so the app is never directly exposed. Changing this to 0.0.0.0 would
-# publish an unauthenticated-until-OAuth surface on a public IP.
+# publish a surface that has no password on it yet to a public IP.
 ExecStart=__DIR__/.venv/bin/uvicorn server.app:app \
   --host 127.0.0.1 --port 8000 \
   --proxy-headers --forwarded-allow-ips=127.0.0.1 \

@@ -5,7 +5,7 @@
 #
 # Installs: swap, python + venv, the app, systemd units, Tailscale. Does NOT
 # start serving publicly until you run `tailscale up` and `tailscale funnel`,
-# because the app must not be reachable before OAuth is configured.
+# because the app must not be reachable before a password is configured.
 set -euo pipefail
 
 REPO="${REPO:-https://github.com/jmbilbao25/Agentic-OS.git}"
@@ -111,24 +111,32 @@ Remaining steps — these need your accounts, so they cannot be scripted.
    Funnel gives you a real Let's Encrypt certificate on a stable hostname
    with no domain purchase and no inbound port open in the security group.
 
-2. Create the Google OAuth client:
-     console.cloud.google.com -> APIs & Services -> Credentials
-     -> Create credentials -> OAuth client ID -> Web application
-     Authorised redirect URI:  https://<host>.ts.net/auth/callback
+2. Set your username and password:
 
-3. Put the values in ~/Agentic-OS/server/.env :
-     GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
-     AGENTOS_BASE_URL=https://<host>.ts.net
-     OAUTH_REDIRECT_URI=https://<host>.ts.net/auth/callback
-     ALLOWED_EMAILS=you@gmail.com
-     OPENROUTER_API_KEY=sk-or-...            (openrouter.ai/keys)
+     cd ~/Agentic-OS
+     .venv/bin/python -m server.passwd
+
+   It prints AGENTOS_USER, AGENTOS_PASSWORD_HASH and a SESSION_SECRET.
+   Paste all three into server/.env. The password itself is never
+   stored — only a PBKDF2 hash — so this is also how you change it.
+
+3. Add the rest to ~/Agentic-OS/server/.env :
+     AGENTOS_BASE_URL=https://<host>.ts.net   (turns on Secure cookies + HSTS)
+     OPENROUTER_API_KEY=sk-or-...             (openrouter.ai/keys)
+
+   Or leave the key out and set it later in the UI under Settings, where it
+   is written to settings.local.json with mode 600 instead of sitting in .env.
 
 4. Restart and verify:
      sudo systemctl restart agentos
      curl -fsS https://<host>.ts.net/healthz
 
-   Then sign in — and confirm a DIFFERENT Google account gets a 403. That
-   negative test is the one that actually proves the allowlist works.
+   Then check the negative case, which is the test that actually proves
+   anything: open the site in a private window and confirm a wrong password
+   is refused, and that eight wrong attempts lock the address out.
+
+5. Confirm no credential ever reached git:
+     bash bin/os selftest
 
 Useful:
   journalctl -u agentos -f            # app logs

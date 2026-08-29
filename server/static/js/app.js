@@ -1,344 +1,577 @@
-/* AgentOS second brain — UI wiring.
- * Orbit map + command palette + doc preview + streaming RAG answers.
+/* AgentOS second brain — wiring.
+ *
+ * This file owns nothing but connections: the map, the dock, the palette and the
+ * four views are each self-contained, and everything here is the plumbing between
+ * them plus the global keyboard map.
  */
+
+import { get, post, AuthLost } from './api.js';
 import { Orbit, RINGS } from './orbit.js';
-import { md } from './md.js';
+import { Palette } from './palette.js';
+import { ModelPicker, setCatalogue } from './models.js';
+import { DocView, AskView } from './views.js';
+import { GauntletView } from './gauntlet.js';
+import { SettingsView } from './settings.js';
 
 const $ = (s) => document.querySelector(s);
-const api = async (p, o) => {
-  const r = await fetch(p, o);
-  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
-  return r.json();
-};
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-const state = { nodes: [], byId: {}, titles: new Set(), status: null, sel: null };
+const state = {
+  nodes: [], byId: {}, titles: new Set(), stats: null, status: null,
+  filter: null, busy: false,
+};
 
 const orbit = new Orbit($('#stage'));
 
-/* ------------------------------------------------------------------ boot */
+/* -------------------------------------------------------------------- toast */
+
+let toastSeq = 0;
+function toast(msg, kind = '') {
+  const id = ++toastSeq;
+  const icon = kind === 'err' ? 'i-alert' : kind === 'ok' ? 'i-check' : 'i-doc';
+  const el = document.createElement('div');
+  el.className = `toast ${kind}`;
+  el.innerHTML = `<svg class="i" aria-hidden="true"><use href="#${icon}"/></svg>
+    <span>${esc(msg)}</span>`;
+  $('#toasts').append(el);
+  setTimeout(() => {
+    el.style.opacity = '0';
+    setTimeout(() => el.remove(), 220);
+  }, kind === 'err' ? 6200 : 3000);
+  return id;
+}
+
+/** A lost session is not recoverable in place; send them to the login page. */
+function handle(e) {
+  if (e instanceof AuthLost) {
+    toast('Session expired — signing you back in', 'err');
+    setTimeout(() => { window.location.href = '/auth/login'; }, 700);
+    return;
+  }
+  console.error(e);
+  toast(e.message || String(e), 'err');
+}
+
+const guard = (fn) => (...a) => { try { const r = fn(...a); if (r?.catch) r.catch(handle); } catch (e) { handle(e); } };
+
+/* --------------------------------------------------------------------- dock */
+
+const dock = $('#dock');
+let activeTab = null;
+
+function openTab(name) {
+  activeTab = name;
+  dock.classList.add('open');
+  dock.classList.toggle('wide', name === 'gauntlet' || name === 'settings');
+  document.querySelectorAll('.tab').forEach((t) =>
+    t.setAttribute('aria-selected', String(t.dataset.tab === name)));
+  document.querySelectorAll('.view').forEach((v) =>
+    v.classList.toggle('active', v.id === `view-${name}`));
+
+  if (name === 'settings') settings.load().catch(handle);
+  if (name === 'ask') setTimeout(() => askView.focus(), 60);
+}
+
+function closeDock() {
+  dock.classList.remove('open');
+  activeTab = null;
+  orbit.deselect();
+  releaseFocus();
+}
+
+/* Hand focus back to the document.
+ *
+ * Every single-key shortcut is suppressed while focus sits in a field, which is
+ * correct — but closing a panel used to leave the caret inside whatever input you
+ * touched last, so `/`, `j`, `0` and the rest silently stopped working and the
+ * only cure was clicking the background. Closing a surface has to also give the
+ * keyboard back.
+ */
+function releaseFocus() {
+  const el = document.activeElement;
+  if (el && el !== document.body && typeof el.blur === 'function') el.blur();
+}
+
+/* Drag-to-resize, persisted. A dock you cannot widen is a dock you stop using
+   for anything longer than a paragraph. */
+(function resizable() {
+  const grip = $('#dock-grip');
+  const saved = Number(localStorage.getItem('agentos.dockWidth'));
+  if (saved >= 320) document.documentElement.style.setProperty('--dock-w', `${saved}px`);
+
+  let from = null;
+  grip.addEventListener('pointerdown', (e) => {
+    from = { x: e.clientX, w: dock.getBoundingClientRect().width };
+    grip.classList.add('dragging');
+    grip.setPointerCapture(e.pointerId);
+  });
+  grip.addEventListener('pointermove', (e) => {
+    if (!from) return;
+    const w = Math.max(320, Math.min(window.innerWidth - 80, from.w - (e.clientX - from.x)));
+    dock.classList.remove('wide');
+    document.documentElement.style.setProperty('--dock-w', `${w}px`);
+  });
+  grip.addEventListener('pointerup', () => {
+    if (!from) return;
+    from = null;
+    grip.classList.remove('dragging');
+    localStorage.setItem('agentos.dockWidth',
+      String(Math.round(dock.getBoundingClientRect().width)));
+  });
+})();
+
+/* -------------------------------------------------------------------- views */
+
+const askModel = new ModelPicker($('#ask-model-combo'),
+  { blank: 'Use the saved model', onChange: () => {} });
+const gBuilder = new ModelPicker($('#g-builder-combo'),
+  { blank: 'Use the saved builder' });
+const gCritic = new ModelPicker($('#g-critic-combo'),
+  { blank: 'Use the saved critic' });
+
+const setBusy = (b) => { state.busy = b; };
+
+/* Keyboard hints, written for the platform actually in front of you.
+ *
+ * The obvious ⌘/↵ glyphs are a trap: U+2318 and U+21B5 are outside the latin
+ * subset of the bundled face *and* missing from the default Linux monospace, so
+ * they shipped as empty boxes on anything that was not a Mac. Words render
+ * everywhere. */
+const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+document.querySelectorAll('[data-kbd="send"]').forEach((el) => {
+  el.textContent = IS_MAC ? 'Cmd Enter' : 'Ctrl Enter';
+});
+
+const docView = new DocView({
+  titles: () => state.titles,
+  toast,
+  onJump: guard(({ id, title }) => {
+    if (id) return openDoc(id);
+    const n = state.nodes.find((x) => x.title.toLowerCase() === title.toLowerCase());
+    if (n) openDoc(n.id);
+    else toast(`No note named “${title}” yet`, 'err');
+  }),
+});
+
+const askView = new AskView({
+  onOpenDoc: guard(openDoc), modelPicker: askModel, toast, onBusy: setBusy,
+});
+
+const gauntletView = new GauntletView({
+  builderPicker: gBuilder, criticPicker: gCritic, toast,
+  onOpenDoc: guard(openDoc), onBusy: setBusy,
+});
+
+const settings = new SettingsView({
+  toast,
+  onSaved: guard(async () => {
+    await refreshStatus();
+    await loadModels(true);
+  }),
+});
+
+/* --------------------------------------------------------------------- docs */
+
+async function openDoc(id) {
+  if (!id) return;
+  orbit.focus(id);
+  openTab('doc');
+  await docView.load(id);
+}
+
+function askAbout(q) {
+  openTab('ask');
+  askView.setQuestion(q);
+  askView.ask(q).catch(handle);
+}
+
+/* -------------------------------------------------------------------- rail */
+
+function renderRings() {
+  $('#rings').innerHTML = RINGS.slice().reverse().map((r) => `
+    <button class="ring-btn" data-ring="${r.id}" aria-pressed="true"
+            title="Click to hide · shift-click to isolate">
+      <i class="sw"></i><span class="lbl">${r.label}</span>
+      <span class="n">${r.count}</span>
+    </button>`).join('');
+  // The swatch inherits currentColor, so the ring's own hue has to be set on the
+  // button. Done here rather than in CSS because the palette lives in orbit.js.
+  document.querySelectorAll('.ring-btn').forEach((b) => {
+    const ring = RINGS.find((r) => r.id === b.dataset.ring);
+    if (ring) b.style.color = ring.color;
+  });
+}
+
+function syncRingButtons() {
+  document.querySelectorAll('.ring-btn').forEach((b) => {
+    b.setAttribute('aria-pressed', String(orbit.ringVisible(b.dataset.ring)));
+  });
+  updateCounts();
+}
+
+function updateCounts() {
+  $('#scrub-count').textContent = `${orbit.visibleCount()} / ${state.nodes.length}`;
+}
+
+/* Recency scrubber.
+ *
+ * The scale is deliberately non-linear. A vault's edits cluster in the last few
+ * weeks, so a linear slider spends most of its travel inside a span nobody
+ * touched and then jumps from "everything" to "nothing" in the last few pixels.
+ * Raising the fraction to a power puts the resolution where the notes are.
+ *
+ * Slider at 100 means no filter at all, not "the newest instant".
+ */
+function setupScrubber() {
+  const el = $('#scrub');
+  const label = $('#scrub-label');
+
+  const apply = () => {
+    const v = Number(el.value);
+    if (v >= 100) {
+      orbit.setSince(0);
+      label.textContent = 'everything';
+    } else {
+      const { oldest, newest } = orbit;
+      const span = Math.max(1, newest - oldest);
+      // v=0 -> cut at newest (almost nothing shown); v=100 -> cut at oldest.
+      const reach = (v / 100) ** 0.45;          // eased window width
+      const cut = newest - span * reach;
+      orbit.setSince(cut);
+      const days = Math.max(0, Math.round((Date.now() / 1000 - cut) / 86400));
+      label.textContent = days <= 1 ? 'today only' : `last ${days} days`;
+    }
+    updateCounts();
+  };
+
+  el.addEventListener('input', apply);
+  apply();
+}
+
+function setFilter(f) {
+  state.filter = f;
+  const block = $('#filter-block');
+  if (!f) {
+    orbit.setPredicate(null);
+    block.hidden = true;
+    updateCounts();
+    return;
+  }
+  if (f.tag) orbit.setPredicate((n) => (n.tags || []).includes(f.tag));
+  else if (f.layer) orbit.setPredicate((n) => n.layer === f.layer);
+
+  block.hidden = false;
+  $('#filter-chips').innerHTML = `
+    <button class="chip layer" data-act="clear-filter" title="Clear filter">
+      ${f.tag ? `#${esc(f.tag)}` : `@${esc(f.layer)}`} ✕</button>`;
+  const n = orbit.visibleCount();
+  updateCounts();
+  toast(n ? `${n} note${n === 1 ? '' : 's'} match` : 'Nothing matches that filter',
+        n ? '' : 'err');
+}
+
+/* ---------------------------------------------------------------- telemetry */
+
+function renderTelemetry() {
+  const idx = state.status?.index || {};
+  const mode = idx.meta?.mode || 'keyword';
+  const live = state.status?.llm_configured;
+  $('#telemetry').innerHTML = `
+    <span class="pill ${esc(mode)}">${esc(mode)}</span>
+    <span><b>${state.stats?.docs ?? 0}</b> notes</span>
+    <span><b>${idx.chunks ?? 0}</b> chunks</span>
+    <span><b>${idx.vectors ?? 0}</b> vectors</span>
+    <span class="pill ${live ? 'live' : 'off'}">${live
+      ? esc(shortModel(state.status.model)) : 'no key'}</span>`;
+}
+
+const shortModel = (m) => (m || '').split('/').pop() || m || '';
+
+function renderNotices() {
+  const probs = state.status?.problems || [];
+  const box = $('#notices');
+  if (!probs.length) { box.innerHTML = ''; return; }
+  box.innerHTML = probs.map((p, i) => `
+    <div class="notice">
+      <svg class="i" aria-hidden="true"><use href="#i-warn"/></svg>
+      <span>${esc(p)}</span>
+      <button data-dismiss="${i}" aria-label="Dismiss">
+        <svg class="i" aria-hidden="true"><use href="#i-x"/></svg></button>
+    </div>`).join('');
+}
+
+/* --------------------------------------------------------------------- boot */
+
+async function loadGraph() {
+  const graph = await get('/api/graph');
+  state.nodes = graph.nodes;
+  state.byId = Object.fromEntries(graph.nodes.map((n) => [n.id, n]));
+  state.titles = new Set(graph.nodes.map((n) => n.title.toLowerCase()));
+  state.stats = graph.stats;
+  orbit.setData(graph.nodes, graph.edges);
+  renderRings();
+  syncRingButtons();
+  if (graph.missing.length) {
+    console.info('Unresolved wikilinks:', graph.missing);
+  }
+}
+
+async function refreshStatus() {
+  state.status = await get('/api/status').catch(() => null);
+  if (!state.status) return;
+  renderTelemetry();
+  renderNotices();
+  orbit.configure({
+    reducedMotion: state.status.ui?.reduced_motion,
+    spin: state.status.ui?.orbit_spin,
+    labelDensity: state.status.ui?.label_density,
+  });
+  document.body.classList.toggle('reduced-motion',
+    !!state.status.ui?.reduced_motion);
+  gauntletView.setDefaults(state.status.gauntlet);
+  if (state.status.gauntlet) {
+    if (!gBuilder.value) gBuilder.input.placeholder =
+      `Use the saved builder · ${shortModel(state.status.gauntlet.builder)}`;
+    if (!gCritic.value) gCritic.input.placeholder =
+      `Use the saved critic · ${shortModel(state.status.gauntlet.critic)}`;
+  }
+  if (state.status.model) {
+    askModel.input.placeholder = `Use the saved model · ${shortModel(state.status.model)}`;
+  }
+}
+
+async function loadModels(force = false) {
+  try {
+    const r = await get(`/api/models${force ? '?refresh=true' : ''}`);
+    setCatalogue(r.models || []);
+    if (r.error) console.info('model catalogue:', r.error);
+  } catch (e) {
+    if (e instanceof AuthLost) throw e;
+    console.info('model catalogue unavailable:', e.message);
+  }
+}
 
 async function boot() {
   try {
-    const [graph, status] = await Promise.all([
-      api('/api/graph'), api('/api/status').catch(() => null),
-    ]);
-    state.nodes = graph.nodes;
-    state.byId = Object.fromEntries(graph.nodes.map((n) => [n.id, n]));
-    state.titles = new Set(graph.nodes.map((n) => n.title.toLowerCase()));
-    state.status = status;
-
-    orbit.setData(graph.nodes, graph.edges);
+    await loadGraph();
     orbit.start();
-
-    renderLegend();
-    renderStatus(graph.stats, status);
-    if (graph.missing.length) console.info('unresolved wikilinks', graph.missing);
+    setupScrubber();
+    await refreshStatus();
+    loadModels().catch(() => {});
   } catch (e) {
-    $('#stage').insertAdjacentHTML('afterend',
-      `<div class="banner show">Failed to load the vault: <code>${e.message}</code></div>`);
+    handle(e);
+    $('#notices').innerHTML = `<div class="notice">
+      <svg class="i" aria-hidden="true"><use href="#i-warn"/></svg>
+      <span>Could not load the vault: ${esc(e.message)}</span></div>`;
   }
 }
 
-function renderLegend() {
-  $('#legend').innerHTML = RINGS.slice().reverse().map((r) => `
-    <button data-ring="${r.id}" style="color:${r.color}">
-      <i class="sw"></i><span>${r.label}</span>
-      <span class="n">${r.count}</span>
-    </button>`).join('');
-}
+/* ------------------------------------------------------------------ palette */
 
-function renderStatus(stats, status) {
-  const idx = status && status.index || {};
-  const mode = (idx.meta && idx.meta.mode) || 'keyword';
-  $('#status').innerHTML = `
-    <span class="pill ${mode}">${mode}</span>
-    <span>${stats.docs} docs</span>
-    <span>${idx.chunks || 0} chunks</span>
-    <span>${idx.vectors || 0} vectors</span>`;
+const commands = () => [
+  { label: 'Ask the vault', hint: 'Retrieval-grounded answer', keys: 'A',
+    run: () => { openTab('ask'); askView.focus(); } },
+  { label: 'Run a gauntlet', hint: 'Builder vs critic against a real bar',
+    keys: 'G', run: () => openTab('gauntlet') },
+  { label: 'Settings', hint: 'Model, provider, retrieval, interface', keys: ',',
+    run: () => openTab('settings') },
+  { label: 'Sync from git', hint: 'git pull, then reindex',
+    run: guard(doSync) },
+  { label: 'Reindex', hint: 'Incremental rebuild of the search index',
+    run: guard(() => doReindex(false)) },
+  { label: 'Full reindex', hint: 'Rebuild every chunk and vector from scratch',
+    run: guard(() => doReindex(true)) },
+  { label: 'Reset the view', hint: 'Recentre and unfreeze the map', keys: '0',
+    run: () => { orbit.reset(); closeDock(); } },
+  { label: 'Show every ring', hint: 'Undo any ring isolation',
+    run: () => { orbit.showAllRings(); syncRingButtons(); } },
+  { label: 'Clear filters', hint: 'Drop the tag, layer and recency filters',
+    run: () => { setFilter(null); $('#scrub').value = 100;
+                 orbit.setSince(0); $('#scrub-label').textContent = 'everything';
+                 updateCounts(); } },
+  { label: 'Copy vault statistics', hint: 'Counts as JSON',
+    run: () => navigator.clipboard?.writeText(JSON.stringify(state.stats, null, 2))
+      .then(() => toast('Statistics copied'))
+      .catch(() => toast('The browser blocked the clipboard', 'err')) },
+  { label: 'Sign out', hint: 'End this session', keys: '',
+    run: () => { window.location.href = '/auth/logout'; } },
+];
 
-  const probs = (status && status.problems) || [];
-  if (probs.length) {
-    $('#banner').innerHTML = probs.map((p) => `<span>${p}</span>`).join(' · ');
-    $('#banner').classList.add('show');
-    setTimeout(() => $('#banner').classList.remove('show'), 9000);
+const palette = new Palette({
+  onOpenDoc: guard(openDoc),
+  onAsk: guard(askAbout),
+  onFilter: guard(setFilter),
+  commands,
+  nodes: () => state.nodes,
+});
+
+/* Search results light up on the map, so the palette and the map are one view of
+   the same query rather than two unrelated surfaces.
+ *
+ * Capped at 12: beyond that "the results" stops being a shape you can read and
+ * becomes most of the vault. And the highlight is cleared when the palette closes
+ * — it used to persist for the rest of the session, so the map stayed marked up
+ * with a query you had already forgotten. */
+const paintOrig = palette.paint.bind(palette);
+palette.paint = (rows, q, mode) => {
+  paintOrig(rows, q, mode);
+  if (palette.mode === 'find' && q) {
+    orbit.highlight(rows.filter((r) => r.kind === 'doc').map((r) => r.id).slice(0, 12));
+  } else {
+    orbit.clearHighlight();
   }
-}
-
-/* ------------------------------------------------------------- doc panel */
-
-async function openDoc(id) {
-  const node = state.byId[id];
-  if (!node) return;
-  state.sel = id;
-  orbit.focus(id);
-  const p = $('#doc');
-  p.classList.add('open');
-  $('#doc-title').textContent = node.title;
-  $('#doc-body').innerHTML = '<p class="empty">loading…</p>';
-  try {
-    const doc = await api('/api/doc?id=' + encodeURIComponent(id));
-    const tags = (doc.tags || []).map((t) => `<span class="tag">#${t}</span>`).join('');
-    const fm = Object.entries(doc.fm || {})
-      .filter(([k]) => !['tags', 'title'].includes(k))
-      .map(([k, v]) => `<span class="tag">${k}: ${v}</span>`).join('');
-    $('#doc-body').innerHTML = `
-      <div class="meta"><span class="tag">${doc.layer}</span>${tags}${fm}</div>
-      <div class="pathrow"><code>${doc.path}</code>
-        <button data-copy="${doc.path}">copy</button></div>
-      <div class="md">${md(doc.body, { exists: (n) => state.titles.has(n.toLowerCase()) })}</div>`;
-    $('#doc .body').scrollTop = 0;
-  } catch (e) {
-    $('#doc-body').innerHTML = `<p class="empty">could not load: ${e.message}</p>`;
-  }
-}
-
-function jumpToTitle(title) {
-  const n = state.nodes.find((x) => x.title.toLowerCase() === title.toLowerCase());
-  if (n) openDoc(n.id);
-  else toast(`no note named "${title}"`);
-}
-
-/* --------------------------------------------------------------- palette */
-
-let palTimer = null, palHits = [], palSel = 0;
-
-function openPalette(seed = '') {
-  $('#palette').classList.add('open');
-  const inp = $('#q');
-  inp.value = seed;
-  inp.focus();
-  inp.select();
-  seed ? runSearch(seed) : showLocal('');
-}
-
-function closePalette() { $('#palette').classList.remove('open'); }
-
-/* Instant local filter on titles/paths/tags so typing always feels immediate;
-   the server's hybrid search lands a moment later and replaces it. */
-function showLocal(q) {
-  const s = q.trim().toLowerCase();
-  const list = !s ? state.nodes.slice(0, 40)
-    : state.nodes.filter((n) =>
-        n.title.toLowerCase().includes(s) || n.path.toLowerCase().includes(s) ||
-        (n.tags || []).some((t) => t.includes(s)));
-  palHits = list.slice(0, 40).map((n) => ({
-    doc_id: n.id, title: n.title, layer: n.layer, path: n.path,
-    text: n.excerpt, matched: 'name',
-  }));
-  palSel = 0;
-  paintHits(s);
-}
-
-async function runSearch(q) {
-  if (!q.trim()) return showLocal('');
-  showLocal(q);                                  // optimistic
-  try {
-    const r = await api('/api/search?k=25&q=' + encodeURIComponent(q));
-    if ($('#q').value.trim() !== q.trim()) return;   // stale response
-    if (r.hits.length) {
-      palHits = r.hits; palSel = 0; paintHits(q, r.mode);
-    }
-  } catch { /* keep the local results */ }
-}
-
-function paintHits(q, mode) {
-  const box = $('#hits');
-  if (!palHits.length) {
-    box.innerHTML = `<p class="empty">nothing matches “${q}”</p>`;
-    return;
-  }
-  // Chunks are split mid-sentence, so a raw excerpt often opens on a word
-  // fragment ("x as disposable…"). Drop the partial first word.
-  const tidy = (s) => {
-    let t = (s || '').trim().replace(/^\S*\s+/, (m) => (/^[A-Z(“"']/.test(m) ? m : ''));
-    return t.slice(0, 200);
-  };
-  const words = q.trim().split(/\s+/).filter((w) => w.length > 2)
-    .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  const hl = (s) => {
-    let t = (s || '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
-    for (const w of words) t = t.replace(new RegExp(`(${w})`, 'gi'), '<mark>$1</mark>');
-    return t;
-  };
-  box.innerHTML = palHits.map((h, i) => `
-    <button class="hit ${i === palSel ? 'sel' : ''}" data-open="${h.doc_id}">
-      <span class="t"><b>${hl(h.title)}</b><span class="ly">${h.layer}</span>
-        <span class="mt">${h.matched || ''}</span></span>
-      <span class="s">${hl(tidy(h.text))}</span>
-    </button>`).join('');
-  $('#pal-hint').textContent = mode ? `${mode} · ${palHits.length}` : `${palHits.length}`;
-  const sel = box.querySelector('.hit.sel');
-  if (sel) sel.scrollIntoView({ block: 'nearest' });
-}
-
-function movePal(d) {
-  if (!palHits.length) return;
-  palSel = (palSel + d + palHits.length) % palHits.length;
-  paintHits($('#q').value);
-}
-
-/* ------------------------------------------------------------------- ask */
-
-let asking = false;
-
-async function ask(q) {
-  if (!q.trim() || asking) return;
-  asking = true;
-  $('#ask').classList.add('open');
-  const ans = $('#ask-answer');
-  const srcBox = $('#ask-sources');
-  ans.innerHTML = '<span class="cursor-blink"></span>';
-  srcBox.innerHTML = '';
-  let buf = '';
-
-  try {
-    const r = await fetch('/api/ask', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ q }),
-    });
-    if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
-
-    const reader = r.body.getReader();
-    const dec = new TextDecoder();
-    let pending = '';
-
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      pending += dec.decode(value, { stream: true });
-      const frames = pending.split('\n\n');
-      pending = frames.pop();
-      for (const f of frames) {
-        const ev = /event:\s*(\w+)/.exec(f);
-        const dm = /data:\s*([\s\S]*)$/.exec(f);
-        if (!ev || !dm) continue;
-        let data; try { data = JSON.parse(dm[1]); } catch { continue; }
-        if (ev[1] === 'sources') renderSources(data);
-        else if (ev[1] === 'delta') {
-          buf += data;
-          ans.innerHTML = md(buf) + '<span class="cursor-blink"></span>';
-          $('#ask .body').scrollTop = $('#ask .body').scrollHeight;
-        }
-      }
-    }
-    ans.innerHTML = md(buf) || '<p class="empty">no answer returned</p>';
-  } catch (e) {
-    ans.innerHTML = `<p class="empty">ask failed: ${e.message}</p>`;
-  } finally {
-    asking = false;
-  }
-}
-
-function renderSources(list) {
-  if (!list.length) {
-    $('#ask-sources').innerHTML =
-      '<h4>sources</h4><p class="empty">nothing retrieved</p>';
-    return;
-  }
-  $('#ask-sources').innerHTML = '<h4>sources</h4>' + list.map((s) => `
-    <button class="src" data-open="${s.doc_id}">
-      <span class="n">${s.n}</span>
-      <span><b>${s.title}</b> — ${s.heading || ''}<br>
-        <span style="font-size:11px;color:var(--dimmer)">${s.path}</span></span>
-    </button>`).join('');
-}
-
-/* ----------------------------------------------------------------- misc */
-
-let toastT = null;
-function toast(msg) {
-  const t = $('#toast');
-  t.textContent = msg;
-  t.classList.add('show');
-  clearTimeout(toastT);
-  toastT = setTimeout(() => t.classList.remove('show'), 2200);
-}
-
-orbit.onSelect = (n) => openDoc(n.id);
-orbit.onHover = (n, x, y) => {
-  const tip = $('#tip');
-  if (!n) return tip.classList.remove('show');
-  tip.innerHTML = `<b>${n.title}</b><span class="ly">${n.layer} · ${n.words} words</span>`;
-  tip.style.left = Math.min(x + 14, innerWidth - 280) + 'px';
-  tip.style.top = (y + 16) + 'px';
-  tip.classList.add('show');
 };
+palette.onClose = () => { orbit.clearHighlight(); releaseFocus(); };
 
-/* --------------------------------------------------------------- events */
+/* ------------------------------------------------------------------ actions */
+
+async function doSync() {
+  toast('Pulling from git…');
+  const r = await post('/api/sync');
+  if (!r.pull_ok) toast(`git pull failed: ${r.pull}`, 'err');
+  await loadGraph();
+  await refreshStatus();
+  toast(`Reindexed ${r.index.docs} notes · ${r.index.chunks_total} chunks`, 'ok');
+}
+
+async function doReindex(full) {
+  toast(full ? 'Full reindex…' : 'Reindexing…');
+  const r = await post(`/api/reindex${full ? '?full=true' : ''}`);
+  await loadGraph();
+  await refreshStatus();
+  toast(`${r.mode} · ${r.docs} notes · ${r.chunks_total} chunks · ${
+    r.vectors_total} vectors`, 'ok');
+}
+
+/* ------------------------------------------------------------------- events */
 
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-open],[data-ring],[data-copy],[data-wl],[data-act],.x');
-
+  const t = e.target.closest('[data-act],[data-tab],[data-ring],[data-dismiss]');
   if (!t) return;
-  if (t.dataset.open) { openDoc(t.dataset.open); closePalette(); return; }
-  if (t.dataset.wl) { jumpToTitle(t.dataset.wl); return; }
+
+  if (t.dataset.tab) return openTab(t.dataset.tab);
+
   if (t.dataset.ring) {
-    orbit.toggleRing(t.dataset.ring);
-    t.classList.toggle('off');
-    return;
+    if (e.shiftKey) orbit.soloRing(t.dataset.ring);
+    else orbit.toggleRing(t.dataset.ring);
+    return syncRingButtons();
   }
-  if (t.dataset.copy) {
-    navigator.clipboard?.writeText(t.dataset.copy)
-      .then(() => toast('path copied')).catch(() => toast('copy blocked'));
-    return;
-  }
-  if (t.classList.contains('x')) { t.closest('.panel').classList.remove('open'); return; }
+
+  if (t.dataset.dismiss !== undefined) return t.closest('.notice')?.remove();
 
   switch (t.dataset.act) {
-    case 'search': openPalette(); break;
-    case 'ask': $('#ask').classList.add('open'); $('#ask-q').focus(); break;
-    case 'send': ask($('#ask-q').value); break;
-    case 'reset': orbit.reset(); toast('view reset'); break;
-    case 'zin': orbit.zoom(1.25); break;
-    case 'zout': orbit.zoom(1 / 1.25); break;
-    case 'sync':
-      toast('syncing…');
-      api('/api/sync', { method: 'POST' })
-        .then((r) => { toast(`reindexed ${r.index.docs} docs`); boot(); })
-        .catch((e) => toast('sync failed: ' + e.message));
-      break;
-    case 'help': $('#help').classList.toggle('open'); break;
-  }
-});
-
-$('#q').addEventListener('input', (e) => {
-  const v = e.target.value;
-  showLocal(v);
-  clearTimeout(palTimer);
-  palTimer = setTimeout(() => runSearch(v), 190);
-});
-
-$('#q').addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowDown') { e.preventDefault(); movePal(1); }
-  else if (e.key === 'ArrowUp') { e.preventDefault(); movePal(-1); }
-  else if (e.key === 'Enter') {
-    e.preventDefault();
-    if (e.shiftKey) { closePalette(); ask($('#q').value); return; }
-    const h = palHits[palSel];
-    if (h) { openDoc(h.doc_id); closePalette(); }
+    case 'palette': palette.toggle(); break;
+    case 'ask': openTab('ask'); askView.focus(); break;
+    case 'gauntlet': openTab('gauntlet'); break;
+    case 'settings': openTab('settings'); break;
+    case 'close-dock': closeDock(); break;
+    case 'ask-send': askView.ask().catch(handle); break;
+    case 'fetch-bar': gauntletView.fetchBar().catch(handle); break;
+    case 'gauntlet-run': gauntletView.run().catch(handle); break;
+    case 'gauntlet-stop': gauntletView.stop(); break;
+    case 'settings-save': settings.save().catch(handle); break;
+    case 'settings-reset': settings.resetAll().catch(handle); break;
+    case 'clear-filter': setFilter(null); break;
+    default: break;
   }
 });
 
 $('#ask-q').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); ask(e.target.value); }
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault();
+    askView.ask().catch(handle);
+  }
 });
 
+$('#g-goal').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault();
+    gauntletView.run().catch(handle);
+  }
+});
+
+orbit.onSelect = guard((n) => {
+  if (!n) { if (activeTab === 'doc') closeDock(); return; }
+  openDoc(n.id);
+});
+
+orbit.onHover = (n, x, y) => {
+  const tip = $('#tip');
+  if (!n) { tip.classList.remove('show'); tip.setAttribute('aria-hidden', 'true'); return; }
+  tip.innerHTML = `<b>${esc(n.title)}</b>
+    <span class="meta">${esc(n.layer)} · ${n.words} words · ${
+      n.backlinks || 0} in</span>
+    ${n.excerpt ? `<span class="snip">${esc(n.excerpt.slice(0, 140))}…</span>` : ''}`;
+  // Flip before the edge rather than after: a tooltip that hangs off-screen is
+  // worse than one that appears on the other side of the cursor.
+  const w = 280, h = tip.offsetHeight || 90;
+  tip.style.left = `${Math.min(x + 14, window.innerWidth - w - 12)}px`;
+  tip.style.top = `${y + 16 + h > window.innerHeight ? y - h - 12 : y + 16}px`;
+  tip.classList.add('show');
+  tip.setAttribute('aria-hidden', 'false');
+};
+
+/* Which controls should swallow a bare letter key.
+ *
+ * Only the ones where a letter means something. Treating every <input> as
+ * "typing" meant that after nudging the recency slider — a range input, where `j`
+ * has no meaning whatsoever — every single-key shortcut went dead until you
+ * happened to click the background. Range, checkbox and button keep the arrow and
+ * space keys they need and let the rest through.
+ */
+const TEXTUAL = new Set(['text', 'password', 'url', 'search', 'email', 'number',
+                         'tel', 'date', 'time']);
+
+function isTextEntry(el) {
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  const tag = el.tagName;
+  if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  return tag === 'INPUT' && TEXTUAL.has((el.type || 'text').toLowerCase());
+}
+
 document.addEventListener('keydown', (e) => {
-  const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
+  const typing = isTextEntry(document.activeElement);
+
+  // Escape unwinds one layer at a time: palette, then dock, then selection.
   if (e.key === 'Escape') {
-    closePalette();
-    document.querySelectorAll('.panel.open').forEach((p) => {
-      if (p.id !== 'palette') p.classList.remove('open');
-    });
+    if (palette.isOpen) return palette.close();
+    if (dock.classList.contains('open')) return closeDock();
+    if (orbit.selected) { orbit.deselect(); return; }
     return;
   }
+
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    return palette.toggle();
+  }
+
   if (typing) return;
-  if (e.key === '/') { e.preventDefault(); openPalette(); }
-  else if (e.key === 'a') { $('#ask').classList.add('open'); $('#ask-q').focus(); }
-  else if (e.key === '?') $('#help').classList.toggle('open');
-  else if (e.key === '0') orbit.reset();
-  else if (e.key === '+' || e.key === '=') orbit.zoom(1.25);
-  else if (e.key === '-') orbit.zoom(1 / 1.25);
+
+  switch (e.key) {
+    case '/': e.preventDefault(); palette.open(); break;
+    case '>': e.preventDefault(); palette.open('>'); break;
+    case '#': e.preventDefault(); palette.open('#'); break;
+    case '@': e.preventDefault(); palette.open('@'); break;
+    case 'a': case 'A': openTab('ask'); askView.focus(); break;
+    case 'g': case 'G': openTab('gauntlet'); break;
+    case ',': openTab('settings'); break;
+    case '0': orbit.reset(); break;
+    case '+': case '=': orbit.zoom(1.25); break;
+    case '-': orbit.zoom(1 / 1.25); break;
+    case 'r': case 'R': guard(() => doReindex(false))(); break;
+    case 'j': { const n = orbit.step(1); if (n) openDoc(n.id); break; }
+    case 'k': { const n = orbit.step(-1); if (n) openDoc(n.id); break; }
+    case '?': palette.open('>'); break;
+    default: break;
+  }
+});
+
+/* Leaving mid-stream should not silently keep the provider generating. */
+window.addEventListener('beforeunload', () => {
+  askView.stop();
+  gauntletView.stop();
 });
 
 boot();

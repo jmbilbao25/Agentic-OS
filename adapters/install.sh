@@ -55,6 +55,17 @@ link_skills() {
   done
 }
 
+# Every steering file, not a hand-listed subset — adding config/steering/40-x.md
+# should not also require editing this script.
+link_steering() {
+  local dir="$1"
+  mkdir -p "$dir"
+  for f in config/steering/*.md; do
+    [ -f "$f" ] || continue
+    link "$dir/$(basename "$f")" "$f"
+  done
+}
+
 install_agents() {
   echo "agents.md (Codex · Zed · Copilot Workspace · Jules · Devin · opencode)"
   echo "  ok     AGENTS.md is already the native format — nothing to generate"
@@ -69,7 +80,7 @@ install_claude() {
 install_kiro() {
   echo "kiro (Kiro IDE · CLI · Web)"
   emit ".kiro/steering/00-kernel.md" "$(printf -- '---\ninclusion: always\n---')"
-  link ".kiro/steering/10-vault-conventions.md" "config/steering/10-vault-conventions.md"
+  link_steering ".kiro/steering"
   link_skills ".kiro/skills"
   mkdir -p .kiro/hooks
   cat > .kiro/hooks/agentos-boot.json <<'JSON'

@@ -4,14 +4,22 @@ uvicorn[standard]==0.34.0
 itsdangerous==2.2.0
 python-dotenv==1.0.1
 httpx==0.28.1
-
-# Auth
-authlib==1.4.0
 starlette>=0.41
+
+# Auth is username + a PBKDF2 hash from hashlib, so there is nothing to install
+# for it. The login form is application/x-www-form-urlencoded, which Starlette
+# parses natively — declaring FastAPI Form() parameters instead would have pulled
+# in python-multipart for no behavioural gain.
 
 # Semantic search — optional but recommended.
 # Without these the app runs keyword-only (SQLite FTS5 + BM25), which is a
 # supported mode, not a broken one. fastembed pulls onnxruntime and ships
 # quantised CPU weights; there is deliberately no torch here.
+#
+# sqlite-vec also needs a Python built with loadable SQLite extensions. Some
+# distro and pyenv builds are not: check with
+#   python -c "import sqlite3;print(hasattr(sqlite3.connect(':memory:'),'enable_load_extension'))"
+# A False there is why an install with both packages present still reports
+# keyword-only mode.
 sqlite-vec==0.1.6
 fastembed==0.5.1

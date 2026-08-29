@@ -93,8 +93,101 @@ def _rrf(weighted_lists, k: int) -> Dict[int, float]:
     return out
 
 
+WORDS = re.compile(r"[a-z0-9]+")
+
+
+def _norm(s: str):
+    return WORDS.findall((s or "").lower())
+
+
+def name_affinity(query: str, title: str, path: str) -> float:
+    """How much a query looks like it is *naming* a document, from 0 to 1.
+
+    Why this exists: neither half of the hybrid can see a title.
+
+    BM25 indexes `title`, but every chunk of a document carries the *same* title,
+    so a title match lifts all of a document's chunks equally and never
+    distinguishes that document from any other — it cancels out in the ranking.
+    The vector side embeds `heading + text`, so the title is not in the vector at
+    all. The result was that the single most common query in a personal vault —
+    typing a note's name to jump to it — was the thing the ranker was worst at.
+    Measured before this: "AGENTS.md" did not return AGENTS.md in the top four,
+    and "ralph" put Ralph Loop third behind two notes that merely mention it.
+
+    Deliberately a small bounded nudge, not an override: a strong agreement
+    between keyword and vector search should still be able to win, because
+    sometimes the words you typed really are a topic and not a filename.
+    """
+    q = _norm(query)
+    if not q:
+        return 0.0
+
+    stem = path.rsplit("/", 1)[-1]
+    if stem.endswith(".md"):
+        stem = stem[:-3]
+
+    best = 0.0
+    for cand in (title, stem):
+        c = _norm(cand)
+        if not c:
+            continue
+        if q == c:
+            return 1.0                          # named it exactly
+        # A prefix either way: "ralph" for "Ralph Loop", or someone typing the
+        # title plus a stray word.
+        if len(q) < len(c) and c[:len(q)] == q:
+            best = max(best, 0.85)
+        elif len(c) < len(q) and q[:len(c)] == c:
+            best = max(best, 0.7)
+        cset, qset = set(c), set(q)
+        covered = len(qset & cset) / len(qset)
+        if qset <= cset:
+            best = max(best, 0.75)              # every word you typed is in the name
+        elif covered >= 0.5:
+            best = max(best, 0.5 * covered)
+    return best
+
+
+def fuse(db, q: str, kw: List[Dict], sem: List[Dict]):
+    """Combine the two rankings and apply the name nudge.
+
+    Lives here, and is imported by tools/eval_retrieval.py, so that the thing the
+    benchmark measures is the thing the app runs. The evaluator used to reimplement
+    fusion inline, which meant any change to ranking was invisible to the
+    benchmark that existed to catch ranking regressions.
+
+    Returns (scores_by_rowid, name_affinity_by_doc_id).
+    """
+    fused = _rrf([(l, w) for l, w in ((kw, config.W_KEYWORD),
+                                      (sem, config.W_SEMANTIC)) if l],
+                 config.RRF_K)
+    if not fused:
+        return {}, {}
+
+    rows = {r["rowid"]: r for r in list(kw) + list(sem)}
+    doc_ids = {r["doc_id"] for r in rows.values()}
+
+    named: Dict[str, float] = {}
+    w_title = config.W_TITLE
+    if w_title:
+        marks = ",".join("?" * len(doc_ids))
+        for d in db.execute(
+                "SELECT id, title, path FROM docs WHERE id IN (%s)" % marks,
+                tuple(doc_ids)):
+            aff = name_affinity(q, d["title"], d["path"])
+            if aff:
+                named[d["id"]] = aff
+
+        for rowid, row in rows.items():
+            aff = named.get(row["doc_id"])
+            if aff:
+                fused[rowid] += w_title * aff
+
+    return fused, named
+
+
 def search(q: str, top_k: Optional[int] = None, layers: Optional[List[str]] = None,
-           max_per_doc: int = 2):
+           max_per_doc: Optional[int] = None):
     """Return ranked chunks with their parent document metadata.
 
     `max_per_doc` keeps one verbose note from monopolising the result set. Three
@@ -102,6 +195,7 @@ def search(q: str, top_k: Optional[int] = None, layers: Optional[List[str]] = No
     and it makes the citation list look padded.
     """
     top_k = top_k or config.TOP_K
+    max_per_doc = max_per_doc or config.MAX_PER_DOC
     if not q or not q.strip():
         return {"query": q, "mode": "empty", "hits": []}
 
@@ -112,9 +206,7 @@ def search(q: str, top_k: Optional[int] = None, layers: Optional[List[str]] = No
     kw = _keyword(db, q, pool)
     sem = _semantic(db, q, pool) if vec_ok else []
 
-    fused = _rrf([(l, w) for l, w in ((kw, config.W_KEYWORD),
-                                      (sem, config.W_SEMANTIC)) if l],
-                 config.RRF_K)
+    fused, named = fuse(db, q, kw, sem)
     if not fused:
         db.close()
         return {"query": q, "mode": "hybrid" if sem else "keyword", "hits": []}

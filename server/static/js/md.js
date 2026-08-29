@@ -21,8 +21,10 @@ function inline(s, opts) {
            `${dead ? ' title="no note with this name yet"' : ''}>` +
            `${esc(label || name)}</span>`;
   });
+  // Sized by a class, not a style attribute: the app ships a CSP without
+  // 'unsafe-inline', which blocks inline style attributes outright.
   t = t.replace(/!\[([^\]]*)\]\(([^)\s]+)[^)]*\)/g,
-                (_, a, u) => `<img alt="${a}" src="${u}" style="max-width:100%">`);
+                (_, a, u) => `<img alt="${a}" src="${u}" class="md-img" loading="lazy">`);
   t = t.replace(/\[([^\]]+)\]\(([^)\s]+)[^)]*\)/g, (_, a, u) => {
     const safe = /^(https?:|mailto:|#|\/)/i.test(u);
     return safe ? `<a href="${u}" target="_blank" rel="noopener">${a}</a>` : a;

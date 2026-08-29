@@ -2,11 +2,30 @@
 .obsidian/workspace-mobile.json
 .DS_Store
 __pycache__/
+*.pyc
 
 # server runtime
 server/.env
+server/settings.local.json     # holds the API key set from the UI
 server/index.db
 server/index.db-wal
 server/index.db-shm
 .venv/
-*.pyc
+
+# test scaffolding — installed on demand, never committed
+.uitest/
+.screens/
+
+# Credentials. Nothing in this repo needs a key material file, so a broad ignore
+# costs nothing and stops the common accident. `bash bin/os selftest` also scans
+# tracked files for key and token signatures, because .gitignore does not help
+# with a file that was added before it was ignored.
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ecdsa*
+id_ed25519*
+*.env
+!server/.env.example

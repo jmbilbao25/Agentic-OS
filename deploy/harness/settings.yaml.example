@@ -25,27 +25,26 @@ llm-pi-ai:
       apiKeyEnv: OPENROUTER_API_KEY
 
       models:
-        # Primary. Free tier, 256k context, and — the part that matters for a
-        # harness — it supports tool calling, without which none of the vault
-        # tools can be reached.
-        - id: z-ai/glm-5.2:free
-          name: GLM 5.2 (free)
-          contextWindow: 256000
-          # Deliberately far below the model's 230k output ceiling. Configuring
-          # maxTokens also makes it this model's per-request default, and a
-          # default of "as much as possible" invites a single answer that costs
-          # minutes and fills the context window.
-          maxTokens: 16384
-
-        # Paid fallback, and worth reaching for sooner than you would think. The
-        # `:free` tiers rate-limit hard and unpredictably; this is $0.075 per
-        # million prompt tokens, which for a personal vault is close enough to
-        # free while actually answering.
+        # The default, because it is the cheapest one that reliably answers.
+        # $0.075/M prompt, and it reasons and calls tools. 1.3M context.
         - id: z-ai/glm-5.3-flash
           name: GLM 5.3 Flash
           contextWindow: 1310720
+          # Deliberately far below the model's ceiling. Configuring maxTokens also
+          # makes it this model's per-request default, and a default of "as much
+          # as possible" invites a single answer that costs minutes and fills the
+          # context window.
           maxTokens: 32768
           input: [text, image]
+
+        # Free, 256k context, supports tool calling — and rate-limited upstream
+        # often enough to fail the first message of a session. Kept because when
+        # it works it costs nothing; not the default because a harness whose
+        # opening turn 429s looks broken rather than busy.
+        - id: z-ai/glm-5.2:free
+          name: GLM 5.2 (free — rate-limits)
+          contextWindow: 256000
+          maxTokens: 16384
 
         # Full GLM 5.2 for work that warrants it. ~16x the price of Flash.
         - id: z-ai/glm-5.2

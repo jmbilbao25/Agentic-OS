@@ -167,7 +167,7 @@ See `deploy/README.md` and the `deploy-always-on` loop ledger.
 The map answers *"what do I know?"*. The **JM Agentic-OS Harness** answers *"do
 something with what I know"* — an agent that plans, researches against the vault, and
 writes back to it. Built on [DSH](https://github.com/deepseek-ai/deepseek-harness),
-running GLM 5.2 through OpenRouter.
+running GLM 5.3 Flash through OpenRouter.
 
 ```bash
 bash deploy/install-harness.sh                  # on the box, after provision.sh

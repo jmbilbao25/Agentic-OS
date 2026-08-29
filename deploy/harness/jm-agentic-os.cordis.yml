@@ -86,10 +86,25 @@
 # `provider` is the route key from the `llm-pi-ai:` section of
 # $DSH_HOME/settings.yaml — see settings.yaml.example next to this file. The
 # route must exist there or the agent starts with no usable model.
+#
+# Why Flash and not `z-ai/glm-5.2:free`, which is the obvious choice and free:
+# measured against a live key, `:free` returns
+#
+#   429 — "z-ai/glm-5.2:free is temporarily rate-limited upstream"
+#
+# often enough that it fails the *first* message of a session, and a harness whose
+# opening turn errors is indistinguishable from a broken install. Flash is
+# $0.075 per million prompt tokens — for a personal vault that is pennies a month —
+# and it answers, reasons, and calls tools. Both were verified end to end; the free
+# tier's problem is capacity, not capability.
+#
+# Prefer free and don't mind the retries? Change this one line to
+# `z-ai/glm-5.2:free`, or pick it from the Models page in the harness UI, which
+# writes the choice to $DSH_HOME/settings.yaml and needs no restart.
 - id: agent-default-model
   config:
     provider: openrouter
-    model: z-ai/glm-5.2:free
+    model: z-ai/glm-5.3-flash
 
 # ── the vault, as tools ──────────────────────────────────────────────────────
 - insert:

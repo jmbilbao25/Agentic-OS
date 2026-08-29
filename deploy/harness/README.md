@@ -71,10 +71,11 @@ Use a different password from the vault UI's. They are different surfaces with d
 
 ## The model
 
-`z-ai/glm-5.2:free` — 256k context, free, and it supports tool calling, without which none of this works. Two things to know:
+`z-ai/glm-5.3-flash` by default. Three things to know:
 
-- **Free tiers rate-limit hard.** When it 429s, switch to `z-ai/glm-5.3-flash` in the Models page. At $0.075 per million prompt tokens it is close enough to free for a personal vault, and it answers.
-- **Tool support is the hard requirement.** Any model without it turns the harness into a chatbot that cannot see the vault. Both fallbacks in `settings.yaml.example` support tools.
+- **The free tier is not the default, on purpose.** `z-ai/glm-5.2:free` is genuinely free and supports tools, and measured against a live key it returns `429 — temporarily rate-limited upstream` often enough to fail the *first* message of a session. A harness whose opening turn errors is indistinguishable from a broken install. Flash is $0.075 per million prompt tokens — pennies a month for a personal vault — and it answers.
+- **Switching is one click.** The Models page writes your choice to `$DSH_HOME/settings.yaml` and needs no restart. Pick `GLM 5.2 (free)` if you would rather have the retries than the invoice.
+- **Tool support is the hard requirement.** A model without it turns the harness into a chatbot that cannot see the vault. All three routes in `settings.yaml.example` support tools; that was verified, not assumed.
 
 ## What the agent can and cannot do
 

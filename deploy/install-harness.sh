@@ -185,30 +185,42 @@ fi
 # hole once — the repo used to be in ReadWritePaths, and DSH's bash/fs tools went
 # straight past the path jail.
 say "verifying the agent cannot write the vault directly"
+# The probe reads its sandbox straight off the installed unit rather than
+# restating it. Restating it meant the check tested a policy the service did not
+# have, and duly reported a hole that did not exist — a test that disagrees with
+# production is worse than no test.
+_rwp=$(systemctl show jm-harness -p ReadWritePaths --value)
+_rop=$(systemctl show jm-harness -p ReadOnlyPaths --value)
+_iap=$(systemctl show jm-harness -p InaccessiblePaths --value)
+_wd=$(systemctl show jm-harness -p WorkingDirectory --value)
 probe=$(sudo systemd-run --quiet --pipe --wait \
-  -p User="$USER" -p WorkingDirectory="$WORKSPACE" \
+  -p User="$USER" -p WorkingDirectory="$_wd" \
   -p ProtectSystem=strict -p ProtectHome=read-only \
-  -p ReadWritePaths="$HOME" \
-  -p ReadOnlyPaths="$DIR $HOME/.nvm" \
-  -p InaccessiblePaths="-$HOME/.ssh $DIR/server/.env $DIR/server/settings.local.json" \
+  ${_rwp:+-p ReadWritePaths="$_rwp"} \
+  ${_rop:+-p ReadOnlyPaths="$_rop"} \
+  ${_iap:+-p InaccessiblePaths="$_iap"} \
   -p PrivateTmp=true -p NoNewPrivileges=true \
   /bin/bash -c '
     w=0
     echo x > '"$DIR"'/brain/wiki/.probe 2>/dev/null && { echo "BRAIN_WRITABLE"; rm -f '"$DIR"'/brain/wiki/.probe; w=1; }
-    echo x >> '"$DIR"'/AGENTS.md 2>/dev/null && { echo "KERNEL_WRITABLE"; sed -i "$ d" '"$DIR"'/AGENTS.md; w=1; }
+    echo x >> '"$DIR"'/AGENTS.md 2>/dev/null && { echo "KERNEL_WRITABLE"; w=1; }
+    echo x > '"$DIR"'/server/mcp.py 2>/dev/null && { echo "SERVER_WRITABLE"; w=1; }
     head -c 1 '"$DIR"'/server/.env >/dev/null 2>&1 && { echo "ENV_READABLE"; w=1; }
     ls '"$HOME"'/.ssh >/dev/null 2>&1 && { echo "SSH_READABLE"; w=1; }
     echo x >> '"$HOME"'/.bashrc 2>/dev/null && { echo "BASHRC_WRITABLE"; w=1; }
-    echo ok > ./scratch-probe 2>/dev/null && { echo "WORKSPACE_WRITABLE"; rm -f ./scratch-probe; }
     mkdir -p '"$HOME"'/.probe-dir 2>/dev/null && { echo "HOME_WRITABLE"; rmdir '"$HOME"'/.probe-dir; }
+    head -c 1 '"$DIR"'/deploy/harness/jm-agentic-os.cordis.yml >/dev/null 2>&1 && echo "OVERLAY_READABLE"
     exit $w
-  ' 2>&1 || true)
-if printf '%s' "$probe" | grep -qE 'BRAIN_WRITABLE|KERNEL_WRITABLE|ENV_READABLE|SSH_READABLE|BASHRC_WRITABLE'; then
-  warn "SANDBOX HOLE: $(printf '%s' "$probe" | tr '\n' ' ')"
-  warn "the agent's own fs/bash tools can reach the vault — do not expose this."
+  ' 2>/dev/null || true)
+_bad=$(printf '%s' "$probe" | grep -oE 'BRAIN_WRITABLE|KERNEL_WRITABLE|SERVER_WRITABLE|ENV_READABLE|SSH_READABLE|BASHRC_WRITABLE' | tr '\n' ' ')
+if [ -n "$_bad" ]; then
+  warn "SANDBOX HOLE: $_bad"
+  warn "the agent can reach something it should not — do not expose this."
+elif ! printf '%s' "$probe" | grep -q OVERLAY_READABLE; then
+  warn "the harness cannot read its own overlay — it will not boot"
 else
-  say "sandbox holds: vault + kernel + ~/.nvm read-only, server/.env and ~/.ssh hidden$(
-      printf '%s' "$probe" | grep -q HOME_WRITABLE && echo ', HOME writable so New Folder works')"
+  say "sandbox verified: vault, kernel, server/ and ~/.nvm read-only; server/.env and ~/.ssh hidden$(
+      printf '%s' "$probe" | grep -q HOME_WRITABLE && echo '; HOME writable so New Folder works')"
 fi
 
 # -------------------------------------------- 6c. pnpm, for `dsh plugin`

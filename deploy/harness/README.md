@@ -24,7 +24,21 @@ browser ──► SSH tunnel ──► jm-harness :3080   the agent UI  (no auth
                            brain/*.md
 ```
 
-The harness has **no filesystem access to `brain/`**. Its systemd unit could not write a note if it tried. Every change goes over MCP and through the jail, so there is exactly one code path that mutates the vault and one place to audit.
+The vault is **read-only to the harness process**, enforced by the unit's sandbox rather than by policy: `ReadWritePaths` lists the agent's scratch workspace and DSH's own state, and nothing else on the box. The only route that can change `brain/` is MCP — over loopback, through the jail, into a git commit.
+
+That distinction matters, because DSH composes its own `bash`, `fs` and `str-replace-editor` tools. They reach the filesystem directly and know nothing about `server/authoring.py`. The first version of this unit used the repo as its working directory *and* put it in `ReadWritePaths`, so those tools could edit `brain/` and append to `AGENTS.md` straight past the jail — verified with a probe, not theorised. The jail was guarding a door that was no longer the only one.
+
+`server/.env` is in `InaccessiblePaths`, so an agent with a shell cannot read your OpenRouter key, login hash or session secret out of it. `install-harness.sh` re-checks all of this on every run and warns loudly if a write succeeds.
+
+**What is still reachable, honestly:** the agent runs with `OPENROUTER_API_KEY` and `AGENTOS_MCP_TOKEN` in its environment, because the provider route and the MCP header resolve them from there. Anything with a shell can read its own `/proc/self/environ`. The MCP token is not an escalation — it grants exactly the tools the agent already has — but the OpenRouter key is a real credential. If that is unacceptable, drop DSH's shell and filesystem tools; the vault tools do not depend on them:
+
+```yaml
+# add to jm-agentic-os.cordis.yml
+- id: tool-bash
+  config: { enabled: false }
+- id: tool-fs
+  config: { enabled: false }
+```
 
 ## The pieces
 
@@ -54,7 +68,7 @@ OPENROUTER_API_KEY=sk-or-...
 
 ## Reaching it
 
-Loopback by default, and that is not laziness — **the DSH web app has no authentication**. No password, no token, no session. It assumes it is bound to localhost on a machine you control.
+Loopback by default, and that is not laziness — **the published DSH web app has no authentication**. No password, no token, no session. It assumes it is bound to localhost on a machine you control, and it enforces that assumption for anything that touches configuration or secrets: see [the configuration plane is loopback-only](#the-configuration-plane-is-loopback-only-and-no-setting-changes-that). Serving it publicly therefore gives you a working chat surface with a read-only settings surface, which is worth knowing before you decide the proxy is enough.
 
 ```sh
 ssh -N -L 3080:127.0.0.1:3080 ec2-user@<host>
@@ -103,6 +117,164 @@ What is done about it:
 - Damage is bounded by everything in the list above: no path escape, no self-modification, append-only journal, write caps, and a git commit per change.
 
 None of this makes injection impossible. All of it makes the outcome bounded, visible and revertable. If you want a stronger guarantee, the honest one is to not give a web-exposed agent write access at all — drop the write tools from `TOOLS` in `server/mcp.py` and it becomes read-only.
+
+## The configuration plane is loopback-only, and no setting changes that
+
+The single most surprising thing about running this behind a proxy. Over the public URL, the Models page fails with
+
+```
+Loading the provider directory failed: settings are unavailable in this browser
+```
+
+and the workspace picker cannot open a directory chooser. Nothing is broken. DSH gates a specific set of methods to a loopback `Host` **unconditionally** — `trustedHosts` and `--trusted-host` do not affect them, because the fence is a DNS-rebinding defence rather than authentication. Its own source says so:
+
+> `trustedHosts` is a DNS-rebinding fence, explicitly not authentication, so the whole configuration plane stays loopback-same-origin until a real authentication layer exists.
+
+Measured on this deployment, same socket, only the `Host` header differing:
+
+| Method | via the public host | via `127.0.0.1` |
+|---|---:|---:|
+| `settings.describe` / `mutate` / `update` / `replace` | **403** | 200 |
+| `credentials.describe` / `set` / `unset` | **403** | 200 |
+| `llm.discoverModels` | **403** | 200 |
+| `agentPreset.read` / `copy` / `remove` / `openDocument` | **403** | 200 |
+| `host.pickDirectory` / `openPath` | **403** | 200 |
+| `llm.providers` / `llm.models` | 200 | 200 |
+
+The last row is why the model *list* renders but you cannot *add* one: reading the catalogue carries no endpoints or key state, so it is deliberately allowed, while everything that reads or writes configuration and secrets is not. `settings.describe` would expose every namespace's configuration and `credentials.describe` reports whether an arbitrary environment variable is set and where from — reconnaissance for an anonymous caller.
+
+Note this is version-specific. The published `0.1.1-rc.2` has **no browser authentication at all**, which is exactly why the config plane is closed. Newer unreleased builds add a launch-token cookie, which is the "real authentication layer" that comment is waiting for; expect this restriction to relax once that ships.
+
+### So how do you change settings?
+
+**Either reach it over loopback** — an SSH tunnel makes the browser's `Host` `127.0.0.1`, and every pane above works, including Models, credentials, presets and the directory picker:
+
+```sh
+ssh -N -L 3080:127.0.0.1:3080 ec2-user@<host>
+# then open http://127.0.0.1:3080  (no password — Caddy is not in the path)
+```
+
+**Or edit the file**, which is hot-reloaded and needs no restart. `$DSH_HOME/settings.yaml` is the same document the Models page writes:
+
+```yaml
+llm-pi-ai:
+  providers:
+    openrouter:
+      api: openai-completions
+      baseURL: https://openrouter.ai/api/v1
+      apiKeyEnv: OPENROUTER_API_KEY
+      models:
+        - id: anthropic/claude-sonnet-4.5     # any OpenRouter model id
+          name: Claude Sonnet 4.5
+          contextWindow: 200000
+          maxTokens: 8192
+```
+
+Adding a whole new provider is the same shape with a new route key — then set `provider:` on the `agent-default-model` row in the overlay, or pick it in the UI over the tunnel. A route the pi-ai catalogue does not ship needs `api`, `baseURL` and a non-empty `models` list, or it is refused where it is written.
+
+## Where to put things
+
+Everything the harness reads lives under two roots: `$DSH_HOME` (`~/.dsh-harness`) and the workspace (`~/harness-workspace`). Nothing here requires touching the repo.
+
+| To add | Put it in | Takes effect |
+|---|---|---|
+| **A skill** for the agent | `~/.dsh-harness/skills/<name>/SKILL.md` | next model step — the root is watched |
+| A skill only for one project | `~/harness-workspace/.dsh/skills/<name>/SKILL.md` | same |
+| **A plugin** | `dsh plugin --profile web add <pkg>` → `~/.dsh-harness/profiles/web/` | restart |
+| Mount a plugin that isn't a bundle | a row in `~/.dsh-harness/profiles/web/cordis.patch.yml` | restart |
+| **Model / provider** changes | `~/.dsh-harness/settings.yaml`, or the Models page | immediately, hot-reloaded |
+| **An agent preset** | `~/.dsh-harness/.agent-presets/<name>/` | restart |
+| A skill bundled with a preset | `~/.dsh-harness/.agent-presets/<name>/skills/<skill>/SKILL.md` | restart |
+
+### Skill roots, in the order DSH scans them
+
+Lower rank wins when two roots define the same skill name. `<projectRoot>` is the nearest ancestor containing `.git`, or the working directory when there is none — here that is `~/harness-workspace`.
+
+| Rank | Source | Path on this box | Writable by the agent |
+|---:|---|---|---|
+| 100 | `project-dsh` | `~/harness-workspace/.dsh/skills` | yes |
+| 200 | `project-agents` | `~/harness-workspace/.agents/skills` | yes |
+| 300 | `custom` | `~/Agentic-OS/config/skills` ← the OS's six | **no**, read-only |
+| 400 | `user-dsh` | `~/.dsh-harness/skills` | yes |
+| 500 | `user-agents` | `~/.agents/skills` | yes |
+
+Rank 300 is set by `customSkillDirs` in `jm-agentic-os.cordis.yml`, which is what makes the OS's skills the agent's skills. It is deliberately read-only to the harness process: the agent can *use* `taste` and `skill-forge`, and cannot rewrite them. Authoring goes to rank 400; promoting into rank 300 is a human step.
+
+**Skill file shape** — discovery is one level deep only, so `<root>/<name>/SKILL.md` or `<root>/<name>.md`. Nested `**/SKILL.md` is ignored.
+
+```yaml
+---
+name: my-skill        # kebab-case, and must equal the directory name
+description: What it does. Use when <the phrases a user would actually type>.
+---
+
+# My skill
+
+Body. Loaded only once the description matches, so put the trigger words in the
+description and the instructions here.
+```
+
+### Automations: not a DSH concept
+
+There is no directory that turns a file into a scheduled job. Two different things get called "automation" here:
+
+- **Agentic-OS automations** — `automations/<name>.py`, plus an entry in the allowlist in `server/app.py`, plus a `deploy/systemd/*.timer`. Three coupled places, all read-only to the agent, all requiring root for the timer. This is code that runs on a schedule with vault write access, so it stays a human change.
+- **`dsh-schedule`** — session-local reminders delivered as chat messages, fixed-interval, no cron, and not composed in this deployment. It is not a substitute for a timer.
+
+The closest thing the agent can create unaided is a **loop** in `brain/loops/`, which is a durable work ledger it can write over MCP and pick up in a later session.
+
+## Plugins — no official marketplace, several community ones
+
+DSH ships **no** marketplace. The built-in `Plugins` pane is `dsh-host-plugin-inventory`, whose own reference calls it a *"read-only projection of the current Cordis Loader plugin state"* that "owns no cache, history, provenance model, event stream, or mutation path." It shows what is loaded; it installs nothing.
+
+**Community marketplaces do exist on npm**, and this deployment installs one: `dsh-plugin-marketplace`. It replaces the Plugins pane with a browsable catalogue of GitHub's `dsh-plugin` topic and installs from the UI.
+
+Understand what that means before adding more. A DSH plugin is a Cordis plugin: it runs **in the harness process**, with the harness's environment — which includes `OPENROUTER_API_KEY` — and its access to the vault MCP tools. There is no plugin sandbox. `npm install` from a marketplace UI is `npm install` with your credentials in reach.
+
+The one installed here was read before installing, and the notes are worth keeping as the bar for the next one:
+
+| Check | `dsh-plugin-marketplace@0.2.8` |
+|---|---|
+| Provenance | MIT, real repo (`Scorp1o117/dsh-plugin-marketplace`), 692 weekly downloads — the most-used of ~10 |
+| Size | 64 KB, 7 files, no build step |
+| Install scripts | none (no `postinstall`) |
+| Dependencies | one, `@deepseek-ai/schemastery` — DeepSeek's own |
+| Environment read | `process.env.DSH_HOME` only. Not the API key |
+| Network | `api.github.com` (topic search), `registry.npmjs.org`. Nothing else |
+| Subprocesses | `execFile(node, [dshBin, "plugin", "--profile", p, "add", pkg])` — no shell, so no injection; package name regex-validated first; 5-minute timeout |
+| Writes | only `$DSH_HOME/profiles/web/cordis.patch.yml` |
+
+Alternatives, all third-party and all ~2 weeks old at the time of writing: `dsh-marketplace`, `untr-dsh-marketplace`, `@springbrand/dsh-plugin-marketplace`, `@w2112515/dsh-plugin-marketplace` (depends on `execa` — it spawns processes more freely), `@ruihuahe/dsh-plugin-marketplace`, `@starpivot/dsh-plugin-marketplace`, `@dshindex/dsh-plugin-marketplace`, `@webcasa/deepseek-harness-marketplace`.
+
+**You probably already have what you need.** This deployment composes **136 plugins**, including the shell, filesystem, editor, web-fetch, web-search, subagents, plan mode, skills, todo, jobs, goals and the Ralph loop. Check with:
+
+```sh
+dsh web --patch deploy/harness/jm-agentic-os.cordis.yml --dump-config \
+  | grep "^  name: '" | sort -u
+```
+
+**To add one**, `dsh plugin` forwards to pnpm inside the profile directory (`$DSH_HOME/profiles/web`, created on first boot):
+
+```sh
+export DSH_HOME=$HOME/.dsh-harness
+dsh plugin --profile web add <npm-package>
+```
+
+What happens next depends on the package, and dsh tells you which case you are in:
+
+- A package that declares `dsh.bundle` becomes a **profile layer automatically**.
+- Anything else installs as a plain dependency and is *not loaded*. dsh warns: `declares no dsh.bundle — installed as a plain dependency, not a profile layer`. To actually mount it, add a row to `$DSH_HOME/profiles/web/cordis.patch.yml` — a persistent user patch layer applied after every bundle:
+
+```yaml
+- insert:
+    - id: my-plugin
+      name: '<npm-package>'
+      config: {}
+```
+
+Then `sudo systemctl restart jm-harness`.
+
+**One recommendation against.** `@deepseek-ai/dsh-tool-cordis` with `@deepseek-ai/dsh-cordis-host-runner` gives the model self-inspection over the live plugin graph, and DSH's own example config says to "treat this deployment like shell access, not as a security boundary." On a box holding your vault and your API key, that undoes the sandbox described above. Install it on something disposable, not here.
 
 ## Commits pile up on the box — decide what happens to them
 

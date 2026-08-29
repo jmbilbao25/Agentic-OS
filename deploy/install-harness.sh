@@ -93,17 +93,33 @@ if ! grep -q '^OPENROUTER_API_KEY=sk-or-' server/.env 2>/dev/null; then
   warn "every turn will fail with MISSING_CREDENTIAL. Get one at openrouter.ai/keys."
 fi
 
-# ------------------------------------------------------ 4. DSH settings
-export DSH_HOME="${DSH_HOME:-$DIR/.dsh}"
-mkdir -p "$DSH_HOME"
+# ---------------------------------- 4. the agent's workspace and DSH state
+#
+# Both deliberately OUTSIDE the repo. DSH composes its own bash/fs/editor tools,
+# which reach the filesystem directly and know nothing about the path jail in
+# server/authoring.py. If the repo were the working directory and writable, those
+# tools could edit brain/ and AGENTS.md straight past it. Keeping the repo out of
+# the unit's ReadWritePaths is what makes "the vault changes only over MCP" true.
+WORKSPACE="${HARNESS_WORKSPACE:-$HOME/harness-workspace}"
+HARNESS_DSH_HOME="${HARNESS_DSH_HOME:-$HOME/.dsh-harness}"
+mkdir -p "$WORKSPACE" "$HARNESS_DSH_HOME"
+say "agent workspace: $WORKSPACE   (the vault is NOT writable from it)"
+
+# Carry across a settings.yaml from the old in-repo location, so upgrading does not
+# silently drop a model choice made in the UI.
+if [ -f "$DIR/.dsh/settings.yaml" ] && [ ! -f "$HARNESS_DSH_HOME/settings.yaml" ]; then
+  say "migrating settings.yaml out of the repo into $HARNESS_DSH_HOME"
+  cp -a "$DIR/.dsh/settings.yaml" "$HARNESS_DSH_HOME/settings.yaml"
+fi
+
+export DSH_HOME="$HARNESS_DSH_HOME"
 if [ -f "$DSH_HOME/settings.yaml" ]; then
   say "$DSH_HOME/settings.yaml exists, leaving it alone (delete it to re-seed)"
 else
   say "seeding $DSH_HOME/settings.yaml with the OpenRouter route"
   cp deploy/harness/settings.yaml.example "$DSH_HOME/settings.yaml"
 fi
-# DSH_HOME holds sessions and a settings file with no secrets in it, but it is
-# still machine state, not memory. Keep it out of git.
+# The old in-repo path, for checkouts that ran an earlier version of this script.
 grep -qx '.dsh/' .gitignore 2>/dev/null || printf '\n# DSH runtime state for the harness (sessions, settings)\n.dsh/\n' >> .gitignore
 
 # ------------------------------------------- 5. validate the composition
@@ -125,8 +141,15 @@ fi
 # ---------------------------------------------------------- 6. systemd
 say "installing the jm-harness unit"
 sed -e "s|__DIR__|$DIR|g" -e "s|__USER__|$USER|g" -e "s|__NODE_BIN__|$NODE_BIN|g" \
+    -e "s|__WORKSPACE__|$WORKSPACE|g" -e "s|__DSH_HOME__|$HARNESS_DSH_HOME|g" \
+    -e "s|__HOME__|$HOME|g" \
     deploy/systemd/jm-harness.service | sudo tee /etc/systemd/system/jm-harness.service >/dev/null
 sudo systemctl daemon-reload
+# A leftover placeholder becomes a unit that starts in the wrong directory, which
+# is far harder to spot than one that refuses to start.
+if sudo grep -q '__[A-Z_]*__' /etc/systemd/system/jm-harness.service; then
+  die "unsubstituted placeholder in the installed unit: $(sudo grep -o '__[A-Z_]*__' /etc/systemd/system/jm-harness.service | sort -u | tr '\n' ' ')"
+fi
 
 # The vault has to restart to pick up AGENTOS_MCP_TOKEN — /mcp is not registered
 # at all in a process that started without it.
@@ -154,6 +177,79 @@ else
   warn "harness did NOT come up — journalctl -u jm-harness -n 60 --no-pager"
 fi
 
+# ------------------------------------------ 6b. prove the sandbox holds
+#
+# The security claim is that the agent cannot write the vault except over MCP.
+# That claim is only worth making if it is checked, so check it: run a probe with
+# the unit's own sandbox settings and confirm the writes fail. This caught a real
+# hole once — the repo used to be in ReadWritePaths, and DSH's bash/fs tools went
+# straight past the path jail.
+say "verifying the agent cannot write the vault directly"
+# The probe reads its sandbox straight off the installed unit rather than
+# restating it. Restating it meant the check tested a policy the service did not
+# have, and duly reported a hole that did not exist — a test that disagrees with
+# production is worse than no test.
+_rwp=$(systemctl show jm-harness -p ReadWritePaths --value)
+_rop=$(systemctl show jm-harness -p ReadOnlyPaths --value)
+_iap=$(systemctl show jm-harness -p InaccessiblePaths --value)
+_wd=$(systemctl show jm-harness -p WorkingDirectory --value)
+probe=$(sudo systemd-run --quiet --pipe --wait \
+  -p User="$USER" -p WorkingDirectory="$_wd" \
+  -p ProtectSystem=strict -p ProtectHome=read-only \
+  ${_rwp:+-p ReadWritePaths="$_rwp"} \
+  ${_rop:+-p ReadOnlyPaths="$_rop"} \
+  ${_iap:+-p InaccessiblePaths="$_iap"} \
+  -p PrivateTmp=true -p NoNewPrivileges=true \
+  /bin/bash -c '
+    w=0
+    echo x > '"$DIR"'/brain/wiki/.probe 2>/dev/null && { echo "BRAIN_WRITABLE"; rm -f '"$DIR"'/brain/wiki/.probe; w=1; }
+    echo x >> '"$DIR"'/AGENTS.md 2>/dev/null && { echo "KERNEL_WRITABLE"; w=1; }
+    echo x > '"$DIR"'/server/mcp.py 2>/dev/null && { echo "SERVER_WRITABLE"; w=1; }
+    head -c 1 '"$DIR"'/server/.env >/dev/null 2>&1 && { echo "ENV_READABLE"; w=1; }
+    ls '"$HOME"'/.ssh >/dev/null 2>&1 && { echo "SSH_READABLE"; w=1; }
+    echo x >> '"$HOME"'/.bashrc 2>/dev/null && { echo "BASHRC_WRITABLE"; w=1; }
+    mkdir -p '"$HOME"'/.probe-dir 2>/dev/null && { echo "HOME_WRITABLE"; rmdir '"$HOME"'/.probe-dir; }
+    head -c 1 '"$DIR"'/deploy/harness/jm-agentic-os.cordis.yml >/dev/null 2>&1 && echo "OVERLAY_READABLE"
+    exit $w
+  ' 2>/dev/null || true)
+_bad=$(printf '%s' "$probe" | grep -oE 'BRAIN_WRITABLE|KERNEL_WRITABLE|SERVER_WRITABLE|ENV_READABLE|SSH_READABLE|BASHRC_WRITABLE' | tr '\n' ' ')
+if [ -n "$_bad" ]; then
+  warn "SANDBOX HOLE: $_bad"
+  warn "the agent can reach something it should not — do not expose this."
+elif ! printf '%s' "$probe" | grep -q OVERLAY_READABLE; then
+  warn "the harness cannot read its own overlay — it will not boot"
+else
+  say "sandbox verified: vault, kernel, server/ and ~/.nvm read-only; server/.env and ~/.ssh hidden$(
+      printf '%s' "$probe" | grep -q HOME_WRITABLE && echo '; HOME writable so New Folder works')"
+fi
+
+# -------------------------------------------- 6c. pnpm, for `dsh plugin`
+#
+# `dsh plugin --profile web add <pkg>` forwards to pnpm inside the profile
+# directory. Node ships corepack, which can provide pnpm without a global install.
+if ! command -v pnpm >/dev/null 2>&1; then
+  say "enabling pnpm via corepack (needed by \`dsh plugin\`)"
+  corepack enable pnpm >/dev/null 2>&1 || corepack prepare pnpm@latest --activate >/dev/null 2>&1 || \
+    warn "could not enable pnpm; \`dsh plugin\` will not work until it is on PATH"
+fi
+command -v pnpm >/dev/null 2>&1 && say "pnpm $(pnpm -v) available for \`dsh plugin\`"
+
+# A C++ compiler, because plugin installs are not all pure JavaScript.
+#
+# Anything offering a terminal pulls node-pty, a native addon. When its prebuilt
+# binary does not match, npm falls back to `node-gyp rebuild`, which needs g++.
+# provision.sh installs `gcc` but not `gcc-c++`, so C compiled and C++ did not, and
+# an install from the plugin market died with
+#   ELIFECYCLE  node-pty install: `node scripts/prebuild.js || node-gyp rebuild`
+#   make: g++: No such file or directory
+# which names neither the missing package nor the reason.
+if ! command -v g++ >/dev/null 2>&1; then
+  say "installing gcc-c++ (native plugin modules such as node-pty need it)"
+  sudo dnf install -y -q gcc-c++ >/dev/null 2>&1 \
+    || warn "could not install gcc-c++; plugins with native modules will fail to build"
+fi
+command -v g++ >/dev/null 2>&1 && say "g++ $(g++ -dumpversion) available for native plugin builds"
+
 # ------------------------------------------------------- 7. optional HTTPS
 if [ "$PUBLISH_HARNESS" = "1" ]; then
   command -v caddy >/dev/null || die "caddy is not installed; run deploy/provision.sh first"
@@ -166,6 +262,18 @@ if [ "$PUBLISH_HARNESS" = "1" ]; then
   # Rebuild the whole Caddyfile from both site definitions. provision.sh writes
   # this file from deploy/Caddyfile alone, so re-running provision.sh drops the
   # harness block — re-run this script afterwards to put it back.
+  # Tell DSH that this public name is legitimately ours. Its Host/Origin fence
+  # trusts loopback plus declared authorities only, so without this every /api
+  # call from the proxied browser is a 403 and the UI reports transport failures
+  # that look like the backend is down.
+  say "declaring $HHOST to the /api trust fence"
+  cat > deploy/harness/harness.env <<ENVEOF
+# Generated by install-harness.sh. Not in git.
+# Unbraced on purpose in the unit: systemd word-splits \$VAR into arguments.
+DSH_EXTRA_ARGS=--trusted-host $HHOST
+ENVEOF
+  chmod 600 deploy/harness/harness.env
+
   VHOST="${AGENTOS_PUBLIC_HOST:-${NAME_PREFIX:-jm-agentic-os}-${IP//./-}.sslip.io}"
   {
     sed -e "s|__HOST__|$VHOST, ${IP//./-}.sslip.io|g" -e "s|__EMAIL__|admin@$VHOST|g" \
@@ -178,6 +286,24 @@ if [ "$PUBLISH_HARNESS" = "1" ]; then
   if sudo caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1; then
     say "Caddyfile valid"
     sudo systemctl reload caddy || sudo systemctl restart caddy
+
+    # harness.env was written after the unit started, so the trusted host is not
+    # live yet. Restart, then prove the fence actually accepts the public name —
+    # a 403 here is the difference between a working UI and one that loads and
+    # then fails every request.
+    say "restarting the harness so the trusted host takes effect"
+    sudo systemctl restart jm-harness
+    sleep 8
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+      -X POST "http://127.0.0.1:3080/api/llm.providers" \
+      -H "Host: $HHOST" -H "Origin: https://$HHOST" \
+      -H 'Content-Type: application/json' -d '{}' || echo 000)
+    if [ "$code" = "403" ]; then
+      warn "/api still 403 for $HHOST — the trust fence is rejecting it."
+      warn "check: systemctl show jm-harness -p ExecStart | grep trusted-host"
+    else
+      say "/api accepts $HHOST (HTTP $code, anything but 403)"
+    fi
     say "harness will be at https://$HHOST — user 'harness', the password you set"
   else
     warn "Caddyfile INVALID — not reloading. Check with: sudo caddy validate --config /etc/caddy/Caddyfile"

@@ -283,6 +283,59 @@ TOOLS: List[Dict] = [
         }, required=["id"]),
     },
     {
+        "name": "list_skills",
+        "description": (
+            "List the operating system's own skills — the reusable instruction "
+            "bundles in config/skills/ — with their descriptions and any router "
+            "files. Call before writing a skill, to avoid duplicating one."),
+        "inputSchema": _s(type="object", properties={}),
+    },
+    {
+        "name": "write_skill",
+        "description": (
+            "Create a new skill in the operating system: config/skills/<name>/"
+            "SKILL.md, committed to git. This is how a repeated instruction becomes "
+            "permanent capability.\n\n"
+            "IMPORTANT: use this tool. Do NOT try to create the directory or the "
+            "file with shell or filesystem tools — the repository is mounted "
+            "read-only to this process on purpose, so mkdir and write will fail "
+            "with EROFS. This tool is the supported path and it also validates the "
+            "frontmatter, so the skill actually loads.\n\n"
+            "`description` is the only part loaded until the skill fires, so it "
+            "must say what the skill does AND carry the phrases a user would "
+            "actually type. Put the instructions in `body`. Split into `files` only "
+            "when the skill has genuinely distinct jobs; a skill under ~120 lines "
+            "is one file."),
+        "inputSchema": _s(type="object", properties={
+            "name": _s(type="string",
+                       description="kebab-case, becomes the directory name."),
+            "description": _s(type="string",
+                              description="What it does, and the trigger phrases. Min 30 chars."),
+            "body": _s(type="string", description="The instructions, as markdown."),
+            "files": _s(type="object",
+                        description="Optional router files, {\"ui\": \"# UI\\n...\"}. "
+                                    "Keys are kebab-case stems without .md.",
+                        additionalProperties=_s(type="string")),
+            "overwrite": _s(type="boolean", default=False,
+                            description="Replace an existing skill wholesale."),
+        }, required=["name", "description", "body"]),
+    },
+    {
+        "name": "edit_skill",
+        "description": (
+            "Replace an exact string inside an existing skill. Read it first with "
+            "read_note using the id 'skills/<name>'. Same rules as edit_note: the "
+            "match is literal and must be unique."),
+        "inputSchema": _s(type="object", properties={
+            "name": _s(type="string"),
+            "find": _s(type="string"),
+            "replace": _s(type="string"),
+            "file": _s(type="string", default="SKILL",
+                       description="Which file in the bundle, e.g. 'SKILL' or 'ui'."),
+            "count": _s(type="integer", minimum=0, default=1),
+        }, required=["name", "find", "replace"]),
+    },
+    {
         "name": "log_journal",
         "description": (
             "Append one timestamped line to today's journal — what happened, what "
@@ -293,7 +346,8 @@ TOOLS: List[Dict] = [
     },
 ]
 
-_WRITE_TOOLS = {"create_note", "edit_note", "update_note", "delete_note", "log_journal"}
+_WRITE_TOOLS = {"create_note", "edit_note", "update_note", "delete_note", "log_journal",
+                "write_skill", "edit_skill"}
 _BY_NAME = {t["name"]: t for t in TOOLS}
 
 
@@ -440,6 +494,34 @@ def _t_delete_note(args: Dict, _s: _Session) -> str:
     return _after_write(authoring.delete((args.get("id") or "").strip()))
 
 
+def _t_list_skills(args: Dict, _s: _Session) -> str:
+    skills = authoring.list_skills()
+    if not skills:
+        return "This OS has no skills yet."
+    return _pretty({"count": len(skills), "skills": skills})
+
+
+def _t_write_skill(args: Dict, _s: _Session) -> str:
+    files = args.get("files") or None
+    if files is not None and not isinstance(files, dict):
+        raise WriteRefused("`files` must be an object of {stem: content}.")
+    return _after_write(authoring.write_skill(
+        args.get("name") or "",
+        args.get("description") or "",
+        args.get("body") or "",
+        files=files,
+        overwrite=bool(args.get("overwrite"))))
+
+
+def _t_edit_skill(args: Dict, _s: _Session) -> str:
+    return _after_write(authoring.edit_skill(
+        args.get("name") or "",
+        args.get("find") or "",
+        args.get("replace") if args.get("replace") is not None else "",
+        file=(args.get("file") or "SKILL"),
+        count=int(args.get("count") if args.get("count") is not None else 1)))
+
+
 def _t_log_journal(args: Dict, _s: _Session) -> str:
     text = (args.get("text") or "").strip()
     if not text:
@@ -458,6 +540,9 @@ _IMPL = {
     "update_note": _t_update_note,
     "delete_note": _t_delete_note,
     "log_journal": _t_log_journal,
+    "list_skills": _t_list_skills,
+    "write_skill": _t_write_skill,
+    "edit_skill": _t_edit_skill,
 }
 
 

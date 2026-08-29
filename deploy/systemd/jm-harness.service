@@ -18,7 +18,20 @@ StartLimitBurst=6
 [Service]
 Type=simple
 User=__USER__
-WorkingDirectory=__DIR__
+# NOT the repo, and this is the load-bearing line of the whole security model.
+#
+# DSH composes its own `bash`, `fs` and `str-replace-editor` tools. Those reach the
+# filesystem directly, with no idea that server/authoring.py exists. With the repo
+# as the working directory and in ReadWritePaths, the agent could write brain/ and
+# edit AGENTS.md through them — straight past the path jail, which then guarded a
+# door that was no longer the only one. Verified, not theorised: a probe in this
+# unit's sandbox wrote brain/wiki/ and appended to AGENTS.md.
+#
+# So the vault is not writable by this process at all. It stays *readable* — the
+# repo has to be, or dsh could not read the overlay named in ExecStart — and the
+# only route that can change it is MCP, over loopback, through the jail, into a
+# git commit. The sandbox enforces what the policy claims.
+WorkingDirectory=__WORKSPACE__
 
 # Two files, split by lifetime rather than by tidiness. server/.env is the vault's
 # own config and holds OPENROUTER_API_KEY + AGENTOS_MCP_TOKEN, both of which the
@@ -35,7 +48,13 @@ EnvironmentFile=-__DIR__/deploy/harness/harness.env
 # directory`, which looks nothing like a PATH problem in the journal.
 Environment=PATH=__NODE_BIN__:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-Environment=DSH_HOME=__DIR__/.dsh
+# Also outside the repo, because DSH writes sessions and settings here and the repo
+# is now read-only to this unit.
+Environment=DSH_HOME=__DSH_HOME__
+
+# Where the vault lives, so the overlay can point DSH's skill discovery at
+# config/skills/ without hardcoding a path into a file that is in git.
+Environment=AGENTOS_HOME=__DIR__
 Environment=NODE_ENV=production
 # Node's default heap target assumes a machine with room. On a 1 GB box it will
 # happily grow past what is left after uvicorn and get OOM-killed mid-turn.
@@ -54,7 +73,19 @@ Environment=NODE_OPTIONS=--max-old-space-size=256
 #
 # Host and port come from the overlay's `webserver` row (127.0.0.1:3080), not from
 # flags, so that the bind is stated in one place next to the reason for it.
-ExecStart=__NODE_BIN__/dsh web --patch __DIR__/deploy/harness/jm-agentic-os.cordis.yml --no-open
+# $DSH_EXTRA_ARGS comes from harness.env and is deliberately unbraced, because
+# systemd word-splits `$VAR` into separate arguments and does not split `${VAR}`.
+# It carries `--trusted-host <authority>` when the harness is served through a
+# reverse proxy.
+#
+# Without it, every /api call from a proxied browser returns 403 and the UI fails
+# in a way that looks like a backend outage: "Loading the provider directory
+# failed", "transport failure for /api/host.listDirectory". That is DSH's
+# Host/Origin fence doing its job — a DNS-rebinding defence that trusts loopback
+# plus whatever authorities the deployment declares. Caddy passes the original
+# Host through, so the fence sees the public hostname and refuses it until the
+# deployment says that name is legitimately ours.
+ExecStart=__NODE_BIN__/dsh web --patch __DIR__/deploy/harness/jm-agentic-os.cordis.yml --no-open $DSH_EXTRA_ARGS
 
 Restart=always
 RestartSec=5
@@ -73,12 +104,35 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-# Sessions, logs and the settings document live under DSH_HOME inside the repo,
-# so the repo is the only writable path. Note this is NOT how the harness reaches
-# the vault: it has no filesystem access to brain/ and could not write a note if
-# it tried. Every vault change goes over MCP, through the path jail in
-# server/authoring.py, and lands as its own git commit.
-ReadWritePaths=__DIR__
+# The home directory is writable, so the agent can actually work: create project
+# folders, scratch files, and — because pnpm's store lives here — install plugins
+# from the Settings UI. Confining writes to a single scratch directory was tighter
+# but made the workspace picker fail with EROFS on "New folder", which is a tool
+# that cannot do its job.
+ReadWritePaths=__HOME__
+
+# The carve-outs that make the above safe. Deliberately a short, enumerable list
+# rather than an attempt to guess at everything:
+#
+#   the repo   — the vault's integrity is the entire point. DSH composes its own
+#                bash/fs/editor tools, which know nothing about the path jail in
+#                server/authoring.py, so the repo being read-only here is what
+#                makes "brain/ changes only over MCP" true rather than aspirational.
+#                Still readable: dsh must load the overlay named in ExecStart.
+#   ~/.nvm     — the agent's own node and dsh binaries. An agent that can rewrite
+#                its interpreter is not sandboxed by anything downstream of it.
+#   shell rc   — ~/.bashrc and friends run on the next login shell, which is a
+#                persistence route out of this unit's lifetime.
+ReadOnlyPaths=__DIR__ __HOME__/.nvm -__HOME__/.bashrc -__HOME__/.bash_profile -__HOME__/.profile
+
+# Hidden outright, not merely read-only.
+#
+#   server/.env — the OpenRouter key, the login password hash, the session secret.
+#                 A shell would simply cat it. systemd reads EnvironmentFile while
+#                 preparing the unit, before this namespace exists, so the process
+#                 still receives the variables it needs.
+#   ~/.ssh      — box credentials. Nothing the agent does requires them.
+InaccessiblePaths=-__HOME__/.ssh __DIR__/server/.env __DIR__/server/settings.local.json -__DIR__/server/.env.bak
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

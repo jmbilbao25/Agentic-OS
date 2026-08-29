@@ -51,6 +51,30 @@ APPEND_ONLY_LAYERS = ("journal",)
 #: `vault.load()` gives them the id `core/<stem>`, so writes have to resolve that.
 CORE_FILES = {"core/STATE": "STATE.md", "core/lessons": "lessons.md"}
 
+#: The one place outside the vault that may be written, and only through
+#: `write_skill()` below — never through the note functions.
+#:
+#: Skills are the exception to "the OS is read-only" because they are additive
+#: capability rather than the behavioural contract. `config/skills/skill-forge`
+#: exists to encourage writing them ("the second time you are told the same thing,
+#: it becomes a skill"), and an agent that can follow that instruction only by
+#: asking a human to run mkdir is an agent that will not follow it.
+#:
+#: What stays unwritable is the line that actually matters: AGENTS.md is the kernel,
+#: `config/steering/` is loaded into every session, and `server/`, `bin/` and
+#: `deploy/` are the machine. Those define how the agent behaves; a skill defines
+#: what it can do.
+SKILLS_DIR = "config/skills"
+
+#: A skill directory name, and the `name:` in its frontmatter, must match this and
+#: each other. `bin/os selftest` enforces the same rule, so a skill authored here is
+#: valid by the OS's own check rather than merely by ours.
+_SKILL_NAME = re.compile(r"\A[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+
+#: Reference files a skill bundle may carry beside SKILL.md — the router pattern
+#: `skill-forge` describes. Plain stems only: no directories, no traversal.
+_SKILL_FILE = re.compile(r"\A[a-z0-9][a-z0-9-]*\Z")
+
 #: A single note is prose, not a data dump. 512 KiB is ~80k words: far past any
 #: legitimate note, and low enough that a runaway loop cannot fill the disk.
 MAX_BYTES = 512 * 1024
@@ -384,6 +408,161 @@ def append_journal(text: str, *, commit: bool = True) -> Dict:
                        message="brain: log %s" % today)
 
 
+# ----------------------------------------------------------------- skills
+
+def _skills_root() -> Path:
+    """`<repo>/config/skills`, resolved. The jail for every skill write."""
+    return (config.ROOT / SKILLS_DIR).resolve()
+
+
+def _skill_jail(p: Path) -> Path:
+    """Prove `p` is inside config/skills. Mirrors `_jail`, different root.
+
+    Separate from `_jail` on purpose: the vault jail must never accept a path
+    outside `brain/`, and widening it to cover skills would have meant one function
+    guarding two unrelated trees, where a mistake in either direction is silent.
+    """
+    root = _skills_root()
+    full = Path(p).resolve()
+    if root not in full.parents:
+        raise WriteRefused("Refusing to write outside %s: %s" % (SKILLS_DIR, p))
+    if full.suffix.lower() != ".md":
+        raise WriteRefused("Skills are markdown: %s" % full.name)
+    return full
+
+
+def check_skill_name(name: str) -> str:
+    name = (name or "").strip()
+    if not name:
+        raise WriteRefused("A skill name is required.")
+    if not _SKILL_NAME.match(name):
+        raise WriteRefused(
+            "Skill names are kebab-case — lowercase letters, digits and single "
+            "hyphens, for example 'ponytail' or 'loop-engineering'. Got %r." % name)
+    if len(name) > 60:
+        raise WriteRefused("That skill name is too long (max 60 characters).")
+    return name
+
+
+def list_skills() -> List[Dict]:
+    """Every skill in the OS, with whether it has a router."""
+    root = _skills_root()
+    if not root.is_dir():
+        return []
+    out = []
+    for d in sorted(p for p in root.iterdir() if p.is_dir()):
+        main = d / "SKILL.md"
+        if not main.is_file():
+            continue
+        fm, _ = vault.parse_frontmatter(main.read_text(encoding="utf-8", errors="replace"))
+        out.append({
+            "name": d.name,
+            "description": fm.get("description", ""),
+            "files": sorted(p.stem for p in d.glob("*.md") if p.name != "SKILL.md"),
+            "path": rel(main),
+        })
+    return out
+
+
+def write_skill(name: str, description: str, body: str, *,
+                files: Optional[Dict[str, str]] = None,
+                overwrite: bool = False, commit: bool = True) -> Dict:
+    """Create or replace a skill bundle in `config/skills/<name>/`.
+
+    The frontmatter contract is the whole activation mechanism — `description` is
+    the only part loaded until the skill fires — so both fields are required rather
+    than defaulted. A skill with an empty description is a skill that never
+    triggers, which is worse than no skill because it looks present.
+    """
+    name = check_skill_name(name)
+    description = " ".join((description or "").split())
+    if not description:
+        raise WriteRefused(
+            "A skill needs a description: it is the only part loaded until the "
+            "skill fires, and it carries the trigger phrases. Say what the skill "
+            "does and when to use it.")
+    if len(description) < 30:
+        raise WriteRefused(
+            "That description is too thin to trigger on (%d chars). Include the "
+            "phrases a user would actually type." % len(description))
+    if not (body or "").strip():
+        raise WriteRefused("A skill needs a body — the instructions themselves.")
+
+    with _LOCK:
+        d = _skills_root() / name
+        main = _skill_jail(d / "SKILL.md")
+        if main.exists() and not overwrite:
+            raise WriteRefused(
+                "The skill %r already exists. Edit it with edit_skill, or pass "
+                "overwrite to replace it wholesale." % name)
+
+        # Validate every reference name BEFORE writing anything. Validating inside
+        # the write loop meant a bad name left SKILL.md on disk with the router it
+        # promised missing — a half-created skill that loads and then misbehaves,
+        # which is worse than a refusal.
+        refs = []
+        for stem, content in (files or {}).items():
+            clean = (stem or "").strip().removesuffix(".md")
+            if not _SKILL_FILE.match(clean):
+                raise WriteRefused(
+                    "Reference file names are kebab-case stems with no path, for "
+                    "example 'ui' or 'code-review'. Got %r." % stem)
+            if clean == "SKILL":
+                raise WriteRefused("Pass the main body as `body`, not as a file named SKILL.")
+            refs.append((_skill_jail(d / ("%s.md" % clean)), (content or "").strip() + "\n"))
+
+        written = [main]
+        text = "---\nname: %s\ndescription: %s\n---\n\n%s\n" % (
+            name, description, body.strip())
+        _atomic_write(main, text)
+        for ref, content in refs:
+            _atomic_write(ref, content)
+            written.append(ref)
+
+        out = {
+            "action": "write_skill",
+            "name": name,
+            "id": "skills/%s" % name,
+            "path": rel(main),
+            "files": [rel(p) for p in written],
+        }
+        out["git"] = commit_paths(written, "skills: add %s" % name) if commit else {
+            "committed": False, "reason": "not requested"}
+        return out
+
+
+def edit_skill(name: str, find: str, replace: str, *, file: str = "SKILL",
+               count: int = 1, commit: bool = True) -> Dict:
+    """Literal find-and-replace inside one file of a skill bundle."""
+    name = check_skill_name(name)
+    if not find:
+        raise WriteRefused("`find` cannot be empty.")
+    stem = (file or "SKILL").strip().removesuffix(".md")
+    if stem != "SKILL" and not _SKILL_FILE.match(stem):
+        raise WriteRefused("Unknown skill file %r." % file)
+
+    with _LOCK:
+        p = _skill_jail(_skills_root() / name / ("%s.md" % stem))
+        if not p.exists():
+            raise WriteRefused("%s does not exist." % rel(p))
+        old = p.read_text(encoding="utf-8", errors="replace")
+        hits = old.count(find)
+        if hits == 0:
+            raise WriteRefused(
+                "That exact text does not appear in %s. Read it first — whitespace "
+                "and indentation have to match." % rel(p))
+        if count and hits > count:
+            raise WriteRefused(
+                "That text appears %d times in %s but count=%d. Add surrounding "
+                "context, or raise count." % (hits, rel(p), count))
+        _atomic_write(p, old.replace(find, replace, count if count else -1))
+        out = {"action": "edit_skill", "name": name, "path": rel(p),
+               "replacements": hits if not count else min(hits, count)}
+        out["git"] = commit_paths([p], "skills: edit %s" % name) if commit else {
+            "committed": False, "reason": "not requested"}
+        return out
+
+
 def _set_tags(text: str, tags: List[str]) -> str:
     clean = [re.sub(r"[^\w/-]", "", t).strip() for t in tags]
     clean = [t for t in clean if t]
@@ -611,6 +790,64 @@ def _selfcheck() -> int:
                  and q.resolve() != (outside / "secret.md").resolve()]
         ok(not stray, "nothing written outside brain/ (%s)"
            % (", ".join(str(q) for q in stray) or "clean"))
+
+        print("\n== skills: the second jail ==")
+        (config.ROOT / SKILLS_DIR).mkdir(parents=True, exist_ok=True)
+        refuses(lambda: write_skill("../../etc/evil", "x" * 40, "b", commit=False),
+                "traversal in a skill name")
+        refuses(lambda: write_skill("Not Kebab", "x" * 40, "b", commit=False),
+                "a non-kebab-case skill name")
+        refuses(lambda: write_skill("ok-name", "too short", "b", commit=False),
+                "a description too thin to trigger on")
+        refuses(lambda: write_skill("ok-name", "", "b", commit=False),
+                "a skill with no description")
+        refuses(lambda: write_skill("ok-name", "x" * 40, "", commit=False),
+                "a skill with no body")
+        refuses(lambda: write_skill("ref-escape", "x" * 40, "b",
+                                    files={"../escape": "x"}, commit=False),
+                "a reference file escaping the bundle")
+        refuses(lambda: write_skill("ref-sep", "x" * 40, "b",
+                                    files={"sub/dir": "x"}, commit=False),
+                "a reference file with a path separator")
+        # And nothing partial was left behind by either refusal.
+        for stray in ("ref-escape", "ref-sep"):
+            ok(not (config.ROOT / SKILLS_DIR / stray).exists(),
+               "no half-created bundle left by the %r refusal" % stray)
+
+        r = write_skill("ponytail", "Braid a ponytail correctly. Use when the user "
+                        "says ponytail, braid, or tie my hair.",
+                        "# Ponytail\n\nGather, twist, secure.\n",
+                        files={"technique": "# Technique\n\nHold high.\n"},
+                        commit=False)
+        sp = config.ROOT / SKILLS_DIR / "ponytail" / "SKILL.md"
+        ok(sp.is_file(), "skill written to %s" % rel(sp))
+        fm, _ = vault.parse_frontmatter(sp.read_text(encoding="utf-8"))
+        ok(fm.get("name") == "ponytail", "frontmatter name matches the directory")
+        ok(len(fm.get("description", "")) > 30, "description survived")
+        ok((config.ROOT / SKILLS_DIR / "ponytail" / "technique.md").is_file(),
+           "reference file written alongside")
+        ok(r["id"] == "skills/ponytail", "id is %r (matches vault.load_system)" % r["id"])
+        refuses(lambda: write_skill("ponytail", "x" * 40, "b", commit=False),
+                "creating a duplicate skill")
+        ok(any(s["name"] == "ponytail" for s in list_skills()), "list_skills sees it")
+        edit_skill("ponytail", "Gather, twist, secure.", "Gather, twist, secure tightly.",
+                   commit=False)
+        ok("tightly" in sp.read_text(encoding="utf-8"), "edit_skill applied")
+        refuses(lambda: edit_skill("ponytail", "absent text", "x", commit=False),
+                "an edit whose anchor is absent")
+
+        # The note functions must never reach a skill, and vice versa.
+        refuses(lambda: resolve_id("skills/ponytail"), "reaching a skill via resolve_id")
+        refuses(lambda: write("skills/ponytail", "x", commit=False),
+                "writing a skill through the note path")
+
+        print("\n== the kernel and steering stay unwritable ==")
+        (config.ROOT / "AGENTS.md").write_text("# kernel\n", encoding="utf-8")
+        (config.ROOT / "config" / "steering").mkdir(parents=True, exist_ok=True)
+        refuses(lambda: write_skill("../steering/evil", "x" * 40, "b", commit=False),
+                "escaping into config/steering")
+        ok((config.ROOT / "AGENTS.md").read_text(encoding="utf-8") == "# kernel\n",
+           "AGENTS.md untouched by every attempt above")
 
         print("\n== delete ==")
         r = delete("wiki/Repeats", commit=False)

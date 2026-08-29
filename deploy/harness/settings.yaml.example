@@ -30,11 +30,17 @@ llm-pi-ai:
         - id: z-ai/glm-5.3-flash
           name: GLM 5.3 Flash
           contextWindow: 1310720
-          # Deliberately far below the model's ceiling. Configuring maxTokens also
-          # makes it this model's per-request default, and a default of "as much
-          # as possible" invites a single answer that costs minutes and fills the
-          # context window.
-          maxTokens: 32768
+          # 8192, and the number matters for billing, not just for taste.
+          #
+          # Configuring maxTokens makes it this model's per-request default, and
+          # OpenRouter reserves `input_cost + maxTokens x output_price` BEFORE
+          # running the request. At 32768 that reservation exceeded a small
+          # balance and every turn failed with
+          #   402 — "requires more credits, or fewer max_tokens. You requested up
+          #          to 32768 tokens, but can only afford 14617"
+          # while the turn itself would have cost a third of that. A ceiling you
+          # never reach is still a ceiling you pay to reserve.
+          maxTokens: 8192
           input: [text, image]
 
         # Free, 256k context, supports tool calling — and rate-limited upstream
@@ -44,13 +50,13 @@ llm-pi-ai:
         - id: z-ai/glm-5.2:free
           name: GLM 5.2 (free — rate-limits)
           contextWindow: 256000
-          maxTokens: 16384
+          maxTokens: 8192
 
         # Full GLM 5.2 for work that warrants it. ~16x the price of Flash.
         - id: z-ai/glm-5.2
           name: GLM 5.2
           contextWindow: 1048576
-          maxTokens: 32768
+          maxTokens: 8192
 
       # Attribution headers. OpenRouter uses these for its rankings page and, more
       # usefully, they make this deployment identifiable in your own usage log.

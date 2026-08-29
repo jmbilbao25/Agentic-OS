@@ -142,6 +142,7 @@ fi
 say "installing the jm-harness unit"
 sed -e "s|__DIR__|$DIR|g" -e "s|__USER__|$USER|g" -e "s|__NODE_BIN__|$NODE_BIN|g" \
     -e "s|__WORKSPACE__|$WORKSPACE|g" -e "s|__DSH_HOME__|$HARNESS_DSH_HOME|g" \
+    -e "s|__HOME__|$HOME|g" \
     deploy/systemd/jm-harness.service | sudo tee /etc/systemd/system/jm-harness.service >/dev/null
 sudo systemctl daemon-reload
 # A leftover placeholder becomes a unit that starts in the wrong directory, which
@@ -187,23 +188,27 @@ say "verifying the agent cannot write the vault directly"
 probe=$(sudo systemd-run --quiet --pipe --wait \
   -p User="$USER" -p WorkingDirectory="$WORKSPACE" \
   -p ProtectSystem=strict -p ProtectHome=read-only \
-  -p ReadWritePaths="$WORKSPACE $HARNESS_DSH_HOME" \
-  -p InaccessiblePaths="$DIR/server/.env $DIR/server/settings.local.json" \
+  -p ReadWritePaths="$HOME" \
+  -p ReadOnlyPaths="$DIR $HOME/.nvm" \
+  -p InaccessiblePaths="-$HOME/.ssh $DIR/server/.env $DIR/server/settings.local.json" \
   -p PrivateTmp=true -p NoNewPrivileges=true \
   /bin/bash -c '
     w=0
     echo x > '"$DIR"'/brain/wiki/.probe 2>/dev/null && { echo "BRAIN_WRITABLE"; rm -f '"$DIR"'/brain/wiki/.probe; w=1; }
     echo x >> '"$DIR"'/AGENTS.md 2>/dev/null && { echo "KERNEL_WRITABLE"; sed -i "$ d" '"$DIR"'/AGENTS.md; w=1; }
     head -c 1 '"$DIR"'/server/.env >/dev/null 2>&1 && { echo "ENV_READABLE"; w=1; }
+    ls '"$HOME"'/.ssh >/dev/null 2>&1 && { echo "SSH_READABLE"; w=1; }
+    echo x >> '"$HOME"'/.bashrc 2>/dev/null && { echo "BASHRC_WRITABLE"; w=1; }
     echo ok > ./scratch-probe 2>/dev/null && { echo "WORKSPACE_WRITABLE"; rm -f ./scratch-probe; }
+    mkdir -p '"$HOME"'/.probe-dir 2>/dev/null && { echo "HOME_WRITABLE"; rmdir '"$HOME"'/.probe-dir; }
     exit $w
   ' 2>&1 || true)
-if printf '%s' "$probe" | grep -qE 'BRAIN_WRITABLE|KERNEL_WRITABLE|ENV_READABLE'; then
+if printf '%s' "$probe" | grep -qE 'BRAIN_WRITABLE|KERNEL_WRITABLE|ENV_READABLE|SSH_READABLE|BASHRC_WRITABLE'; then
   warn "SANDBOX HOLE: $(printf '%s' "$probe" | tr '\n' ' ')"
   warn "the agent's own fs/bash tools can reach the vault — do not expose this."
 else
-  say "sandbox holds: vault read-only, kernel read-only, server/.env hidden$(
-      printf '%s' "$probe" | grep -q WORKSPACE_WRITABLE && echo ', scratch writable')"
+  say "sandbox holds: vault + kernel + ~/.nvm read-only, server/.env and ~/.ssh hidden$(
+      printf '%s' "$probe" | grep -q HOME_WRITABLE && echo ', HOME writable so New Folder works')"
 fi
 
 # -------------------------------------------- 6c. pnpm, for `dsh plugin`

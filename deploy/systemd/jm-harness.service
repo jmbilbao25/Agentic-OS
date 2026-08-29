@@ -100,18 +100,35 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-# Exactly two writable directories: the agent's scratch workspace and DSH's own
-# state. Everything else on the box, including the vault, is read-only to this
-# process. That is what makes "the harness cannot write the vault except over MCP"
-# a property of the system rather than a claim in a README.
-ReadWritePaths=__WORKSPACE__ __DSH_HOME__
+# The home directory is writable, so the agent can actually work: create project
+# folders, scratch files, and — because pnpm's store lives here — install plugins
+# from the Settings UI. Confining writes to a single scratch directory was tighter
+# but made the workspace picker fail with EROFS on "New folder", which is a tool
+# that cannot do its job.
+ReadWritePaths=__HOME__
 
-# The repo stays readable so dsh can load the overlay, which leaves the secrets in
-# it readable too — server/.env holds the OpenRouter key, the login password hash
-# and the session secret. An agent with a bash tool would simply cat it. Hidden
-# outright; systemd reads EnvironmentFile while preparing the unit, before this
-# namespace exists, so the process still receives the variables it needs.
-InaccessiblePaths=__DIR__/server/.env __DIR__/server/settings.local.json -__DIR__/server/.env.bak
+# The carve-outs that make the above safe. Deliberately a short, enumerable list
+# rather than an attempt to guess at everything:
+#
+#   the repo   — the vault's integrity is the entire point. DSH composes its own
+#                bash/fs/editor tools, which know nothing about the path jail in
+#                server/authoring.py, so the repo being read-only here is what
+#                makes "brain/ changes only over MCP" true rather than aspirational.
+#                Still readable: dsh must load the overlay named in ExecStart.
+#   ~/.nvm     — the agent's own node and dsh binaries. An agent that can rewrite
+#                its interpreter is not sandboxed by anything downstream of it.
+#   shell rc   — ~/.bashrc and friends run on the next login shell, which is a
+#                persistence route out of this unit's lifetime.
+ReadOnlyPaths=__DIR__ __HOME__/.nvm -__HOME__/.bashrc -__HOME__/.bash_profile -__HOME__/.profile
+
+# Hidden outright, not merely read-only.
+#
+#   server/.env — the OpenRouter key, the login password hash, the session secret.
+#                 A shell would simply cat it. systemd reads EnvironmentFile while
+#                 preparing the unit, before this namespace exists, so the process
+#                 still receives the variables it needs.
+#   ~/.ssh      — box credentials. Nothing the agent does requires them.
+InaccessiblePaths=-__HOME__/.ssh __DIR__/server/.env __DIR__/server/settings.local.json -__DIR__/server/.env.bak
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

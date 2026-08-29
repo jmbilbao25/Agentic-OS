@@ -126,20 +126,51 @@ def build(full=False):
 
     db.commit()
 
-    embedded = 0
+    # Backfill: any chunk without a vector, regardless of whether its document
+    # changed. Without this an incremental run can never repair a partial index —
+    # unchanged documents are skipped by content hash, so chunks orphaned by a
+    # failed embed batch would stay vector-less until someone thought to run
+    # --full. Self-healing matters more than the few queries this costs.
+    if vec_ok and embed.available():
+        have = {r[0] for r in pending}
+        try:
+            orphans = db.execute(
+                "SELECT rowid, heading, text FROM chunks "
+                "WHERE rowid NOT IN (SELECT chunk_id FROM chunks_vec)").fetchall()
+        except sqlite3.OperationalError:
+            orphans = []
+        added = 0
+        for row in orphans:
+            if row["rowid"] in have:
+                continue
+            pending.append((row["rowid"], "%s\n%s" % (row["heading"], row["text"])))
+            added += 1
+        if added:
+            log.info("backfilling %d chunk(s) that had no vector", added)
+
+    embedded, failed = 0, 0
     if vec_ok and pending and embed.available():
         B = 32
         for i in range(0, len(pending), B):
             batch = pending[i:i + B]
             vecs = embed.encode([t for _, t in batch])
             if not vecs:
-                break
+                # Keep going rather than break. Aborting on the first bad batch
+                # used to leave the index silently partial while still reporting
+                # itself as hybrid; a gap that is counted and surfaced can be
+                # repaired by re-running, a gap that is hidden cannot.
+                failed += len(batch)
+                log.warning("embed batch %d-%d failed; continuing",
+                            i, i + len(batch))
+                continue
             db.executemany(
                 "INSERT OR REPLACE INTO chunks_vec (chunk_id, embedding) VALUES (?,?)",
                 [(rid, pack(v)) for (rid, _), v in zip(batch, vecs)])
             embedded += len(batch)
             db.commit()
             log.info("embedded %d/%d", embedded, len(pending))
+        if failed:
+            log.warning("%d chunk(s) have no vector — re-run to repair", failed)
 
     total = db.execute("SELECT COUNT(*) c FROM chunks").fetchone()["c"]
     vtotal = (db.execute("SELECT COUNT(*) c FROM chunks_vec").fetchone()["c"]
@@ -157,14 +188,15 @@ def build(full=False):
     db.commit()
     db.close()
 
-    summary = {
+    return {
         "mode": mode, "docs": len(docs), "changed": len(changed),
         "removed": len(gone), "chunks_written": n_chunks,
         "chunks_total": total, "vectors_total": vtotal,
-        "embedded_now": embedded, "seconds": round(time.time() - t0, 2),
+        "embedded_now": embedded, "embed_failed": failed,
+        "coverage": round(vtotal / total, 3) if total else 0.0,
+        "seconds": round(time.time() - t0, 2),
         "embed": embed.status(),
     }
-    return summary
 
 
 def main():

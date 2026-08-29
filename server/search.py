@@ -184,7 +184,14 @@ def index_status():
             except sqlite3.OperationalError:
                 pass
         db.close()
+        # Coverage distinguishes "reindex in progress" from "index is broken".
+        # The indexer commits in batches, so a status poll during a rebuild
+        # legitimately sees vectors < chunks; without this the UI just showed a
+        # number that looked like data loss.
+        coverage = round(vectors / chunks, 3) if chunks else 0.0
         return {"exists": True, "docs": docs, "chunks": chunks,
-                "vectors": vectors, "meta": meta, "embed": embed.status()}
+                "vectors": vectors, "coverage": coverage,
+                "partial": bool(vectors and vectors < chunks),
+                "meta": meta, "embed": embed.status()}
     except Exception as e:                        # noqa: BLE001
         return {"exists": False, "error": str(e), "embed": embed.status()}

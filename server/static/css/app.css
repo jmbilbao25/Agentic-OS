@@ -94,6 +94,9 @@ html, body {
 }
 .status .pill.hybrid { color: #7ee0b8; border-color: #1d4a3a; }
 .status .pill.keyword { color: #ffb03d; border-color: #4a3a1d; }
+.status .pill.partial { color: #ffb03d; border-color: #4a3a1d;
+  animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .5; } }
 
 /* ---------------------------------------------------------------- legend */
 

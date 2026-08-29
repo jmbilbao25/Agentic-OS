@@ -50,11 +50,18 @@ function renderLegend() {
 function renderStatus(stats, status) {
   const idx = status && status.index || {};
   const mode = (idx.meta && idx.meta.mode) || 'keyword';
+  // A partial vector set means a reindex is running (the indexer commits in
+  // batches) or one failed. Say which, instead of showing a number that looks
+  // like data loss.
+  const vec = idx.partial
+    ? `<span class="pill partial" title="a reindex is in progress, or one failed — re-run Sync to repair">
+         ${idx.vectors}/${idx.chunks} vectors · indexing</span>`
+    : `<span>${idx.vectors || 0} vectors</span>`;
   $('#status').innerHTML = `
     <span class="pill ${mode}">${mode}</span>
     <span>${stats.docs} docs</span>
     <span>${idx.chunks || 0} chunks</span>
-    <span>${idx.vectors || 0} vectors</span>`;
+    ${vec}`;
 
   const probs = (status && status.problems) || [];
   if (probs.length) {

@@ -118,9 +118,28 @@ What is done about it:
 
 None of this makes injection impossible. All of it makes the outcome bounded, visible and revertable. If you want a stronger guarantee, the honest one is to not give a web-exposed agent write access at all — drop the write tools from `TOOLS` in `server/mcp.py` and it becomes read-only.
 
-## Plugins — there is no marketplace
+## Plugins — no official marketplace, several community ones
 
-Worth saying plainly, because the Settings UI implies otherwise. DSH has **no plugin store or marketplace**. The `Plugins` pane is `dsh-host-plugin-inventory`, whose own reference describes it as a *"read-only projection of the current Cordis Loader plugin state"* that "owns no cache, history, provenance model, event stream, or mutation path." It shows you what is loaded. It does not install anything.
+DSH ships **no** marketplace. The built-in `Plugins` pane is `dsh-host-plugin-inventory`, whose own reference calls it a *"read-only projection of the current Cordis Loader plugin state"* that "owns no cache, history, provenance model, event stream, or mutation path." It shows what is loaded; it installs nothing.
+
+**Community marketplaces do exist on npm**, and this deployment installs one: `dsh-plugin-marketplace`. It replaces the Plugins pane with a browsable catalogue of GitHub's `dsh-plugin` topic and installs from the UI.
+
+Understand what that means before adding more. A DSH plugin is a Cordis plugin: it runs **in the harness process**, with the harness's environment — which includes `OPENROUTER_API_KEY` — and its access to the vault MCP tools. There is no plugin sandbox. `npm install` from a marketplace UI is `npm install` with your credentials in reach.
+
+The one installed here was read before installing, and the notes are worth keeping as the bar for the next one:
+
+| Check | `dsh-plugin-marketplace@0.2.8` |
+|---|---|
+| Provenance | MIT, real repo (`Scorp1o117/dsh-plugin-marketplace`), 692 weekly downloads — the most-used of ~10 |
+| Size | 64 KB, 7 files, no build step |
+| Install scripts | none (no `postinstall`) |
+| Dependencies | one, `@deepseek-ai/schemastery` — DeepSeek's own |
+| Environment read | `process.env.DSH_HOME` only. Not the API key |
+| Network | `api.github.com` (topic search), `registry.npmjs.org`. Nothing else |
+| Subprocesses | `execFile(node, [dshBin, "plugin", "--profile", p, "add", pkg])` — no shell, so no injection; package name regex-validated first; 5-minute timeout |
+| Writes | only `$DSH_HOME/profiles/web/cordis.patch.yml` |
+
+Alternatives, all third-party and all ~2 weeks old at the time of writing: `dsh-marketplace`, `untr-dsh-marketplace`, `@springbrand/dsh-plugin-marketplace`, `@w2112515/dsh-plugin-marketplace` (depends on `execa` — it spawns processes more freely), `@ruihuahe/dsh-plugin-marketplace`, `@starpivot/dsh-plugin-marketplace`, `@dshindex/dsh-plugin-marketplace`, `@webcasa/deepseek-harness-marketplace`.
 
 **You probably already have what you need.** This deployment composes **136 plugins**, including the shell, filesystem, editor, web-fetch, web-search, subagents, plan mode, skills, todo, jobs, goals and the Ralph loop. Check with:
 

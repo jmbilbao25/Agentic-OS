@@ -1,0 +1,24 @@
+[Unit]
+Description=AgentOS — pull the vault from git and reindex
+Documentation=https://github.com/jmbilbao25/Agentic-OS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+WorkingDirectory=__DIR__
+EnvironmentFile=__DIR__/server/.env
+
+# --ff-only so a divergent history stops here rather than producing a merge
+# commit nobody reviewed. The box is a reader of the vault, not an author.
+ExecStart=/usr/bin/git pull --ff-only --quiet
+ExecStart=__DIR__/.venv/bin/python -m server.index
+
+# Incremental by default: unchanged files are skipped by content hash, so the
+# usual run costs almost nothing and only touched notes get re-embedded.
+TimeoutStartSec=900
+MemoryMax=850M
+
+Nice=10
+IOSchedulingClass=idle

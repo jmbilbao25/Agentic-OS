@@ -1,5 +1,5 @@
 ---
-updated: 2026-08-19
+updated: 2026-08-29
 ---
 
 # Lessons
@@ -10,13 +10,17 @@ without a trigger is a note. Wrong lessons get deleted, not archived.
 - When starting any session in this repo → run `bash bin/os boot` before replying. Because the sandbox starts with no memory of the last session. _(2026-08-19)_
 - When a session produces a decision, lesson, or finished step → `bin/os save` immediately. Because sandbox teardown discards uncommitted work silently. _(2026-08-19)_
 - When work will outlive one context window → create a loop ledger instead of trusting the transcript. Because context compaction drops the middle of long sessions. _(2026-08-19)_
-- When reaching for a hook, custom agent, or repo `mcp.json` on Kiro Web → stop, none of them load; use steering + skills + a shell script. Because Web only reads `.kiro/steering`, `.kiro/skills`, `.kiro/specs`. _(2026-08-19)_
+- When about to rely on a harness feature (hooks, custom agents, repo-level MCP, global config) → verify it actually loads in *this* surface first. Because unsupported config fails silently rather than erroring, and you will debug the wrong layer for an hour. _(2026-08-19)_
 - When about to add a note that overlaps an existing one → rewrite the existing note instead. Because two notes disagreeing is worse than one note being stale. _(2026-08-19)_
 - When `gh pr create` or any `gh pr`/`gh issue` subcommand is tempting → use `gh api` REST instead. Because the GraphQL-backed subcommands always fail in this sandbox. _(2026-08-19)_
 - When the same loop step fails twice → stop, write the blocker into the ledger's Notes, escalate. Because a third identical attempt produces confident garbage. _(2026-08-19)_
 - When verifying a generated UI → load it headless and assert on the DOM, don't assume it renders. Because a template typo produces a blank page that looks fine in source. _(2026-08-19)_
-- When a session starts with an empty workspace or no repo bound → the brain is not missing, it is unclone; run the sidecar clone from the global kernel before claiming no context exists. Because repo-resident steering cannot load in a session bound to no repo. _(2026-08-19)_
-- When the brain needs to be reachable from any session → keep it in its own repo on the default branch, cloned by the global kernel to a fixed path. Because Kiro Web clones only the default branch of a bound repo and offers no branch picker. _(2026-08-19)_
-- When told to sync personal config to Kiro Web → upload each .kiro type folder separately (steering, then skills); the folder NAME is what identifies the config type. Because the Cloud configuration picker takes one top-level folder at a time, not a .kiro root. _(2026-08-19)_
-- When the user wants an agent that is persistent like a real OS (daemon, scheduler, survives reboot) → that is Kiro Crew on their own hardware, not Kiro Web. Because Web has no cron and tears the sandbox down per task; Crew has 'service install' and 'cron'. _(2026-08-19)_
-- When asked to run Kiro's models through Claude Code → say no and explain the boundary. Because Claude Code authenticates only against Anthropic subscriptions/API keys or Bedrock/Vertex/Foundry, and Anthropic forbids third parties exposing claude.ai login or rate limits. _(2026-08-19)_
+- When a session starts with an empty workspace or no repo bound → the brain is not missing, it is uncloned; run the sidecar clone from the global kernel before claiming no context exists. Because repo-resident config cannot load in a session bound to no repo. _(2026-08-19)_
+- When the brain needs to be reachable from any session → keep it in its own repo on the default branch, cloned by the global kernel to a fixed path. Because hosted harnesses clone only the default branch and offer no branch picker. _(2026-08-19)_
+- When the user wants an agent that is persistent like a real OS (daemon, scheduler, survives reboot) → that is a machine they control, not a hosted sandbox. Because hosted surfaces have no cron and tear the sandbox down per task. _(2026-08-19)_
+- When asked to run one vendor's models through another vendor's agent CLI → say no and explain the boundary. Because agent CLIs authenticate only against their own subscription, their own API key, or a cloud reseller, and vendor terms forbid third parties exposing consumer logins. _(2026-08-19)_
+- When writing the kernel → put it in a neutral file (`AGENTS.md`) and generate per-vendor bindings from it. Because a kernel written directly into one vendor's config path binds the OS to that vendor, which is the same mistake as binding it to one repo. _(2026-08-29)_
+- When adding semantic search to a markdown vault → keep markdown authoritative and treat the index as disposable, rebuildable from source. Because state you cannot diff or review in a PR stops being memory and becomes a dependency. _(2026-08-29)_
+- When sizing a box to host a vault plus a search index → a `t3.micro` is enough, provided inference stays remote. Because the index and a quantised embedding model are small; only the LLM is heavy, and it does not need to live with the data. _(2026-08-29)_
+- When a note's own stated revisit-condition comes true → rewrite that note with the reconciliation, keeping the filename. Because the honest record of "we said X, then X's exit condition fired" is more valuable than either a stale note or a silent overwrite. _(2026-08-29)_
+- When an integration seems to need a paid subscription → check whether the software and the inference are separately licensed. Because open-source agents are usually free while the model calls behind them are not, and conflating the two leads to paying for the wrong thing. _(2026-08-29)_

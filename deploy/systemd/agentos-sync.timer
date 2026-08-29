@@ -1,0 +1,20 @@
+[Unit]
+Description=AgentOS — periodic vault pull + reindex
+Documentation=https://github.com/jmbilbao25/Agentic-OS
+
+[Timer]
+# Every 15 minutes, plus once shortly after boot.
+OnBootSec=2min
+OnUnitActiveSec=15min
+
+# Persistent so a run missed while the box was stopped fires on next boot
+# instead of being silently skipped.
+Persistent=true
+
+# Spread the load so the reindex never lands exactly on the quarter hour
+RandomizedDelaySec=90
+
+Unit=agentos-sync.service
+
+[Install]
+WantedBy=timers.target

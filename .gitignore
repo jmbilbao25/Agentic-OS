@@ -2,3 +2,11 @@
 .obsidian/workspace-mobile.json
 .DS_Store
 __pycache__/
+
+# server runtime
+server/.env
+server/index.db
+server/index.db-wal
+server/index.db-shm
+.venv/
+*.pyc

@@ -22,6 +22,10 @@ server/index.db-shm
 # a public remote by a stray `git add -A`.
 .dsh/
 
+# Generated per deployment by install-harness.sh: carries the public hostname this
+# box serves the harness under, which is machine state, not source.
+deploy/harness/harness.env
+
 # Credentials. Nothing in this repo needs a key material file, so a broad ignore
 # costs nothing and stops the common accident. `bash bin/os selftest` also scans
 # tracked files for key and token signatures, because .gitignore does not help

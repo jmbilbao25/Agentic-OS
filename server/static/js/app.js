@@ -188,6 +188,13 @@ function movePal(d) {
 
 let asking = false;
 
+function openAsk() {
+  $('#ask').classList.add('open');
+  const t = $('#ask-q');
+  t.focus();
+  t.setSelectionRange(t.value.length, t.value.length);
+}
+
 async function ask(q) {
   if (!q.trim() || asking) return;
   asking = true;
@@ -196,6 +203,7 @@ async function ask(q) {
   const srcBox = $('#ask-sources');
   ans.innerHTML = '<span class="cursor-blink"></span>';
   srcBox.innerHTML = '';
+  $('#ask .body').scrollTop = 0;
   let buf = '';
 
   try {
@@ -223,12 +231,20 @@ async function ask(q) {
         if (ev[1] === 'sources') renderSources(data);
         else if (ev[1] === 'delta') {
           buf += data;
+          const box = $('#ask .body');
+          // Only follow the stream if the reader is already at the bottom.
+          // Unconditionally jumping to scrollHeight scrolled straight past a
+          // short answer into the citation list, so the answer was never seen.
+          const atBottom =
+            box.scrollHeight - box.scrollTop - box.clientHeight < 60;
           ans.innerHTML = md(buf) + '<span class="cursor-blink"></span>';
-          $('#ask .body').scrollTop = $('#ask .body').scrollHeight;
+          if (atBottom) box.scrollTop = box.scrollHeight;
         }
       }
     }
     ans.innerHTML = md(buf) || '<p class="empty">no answer returned</p>';
+    // Land the reader at the start of the answer, not the end of the sources.
+    $('#ask .body').scrollTop = 0;
   } catch (e) {
     ans.innerHTML = `<p class="empty">ask failed: ${e.message}</p>`;
   } finally {
@@ -242,12 +258,18 @@ function renderSources(list) {
       '<h4>sources</h4><p class="empty">nothing retrieved</p>';
     return;
   }
-  $('#ask-sources').innerHTML = '<h4>sources</h4>' + list.map((s) => `
+  $('#ask-sources').innerHTML = '<h4>sources</h4>' + list.map((s) => {
+    // Suppress the heading when it just repeats the title — a note whose only
+    // H1 is its title rendered as "Git Is The Disk — Git Is The Disk".
+    const h = s.heading && s.heading.trim().toLowerCase() !== s.title.trim().toLowerCase()
+      ? ` <span style="color:var(--dimmer)">— ${s.heading}</span>` : '';
+    return `
     <button class="src" data-open="${s.doc_id}">
       <span class="n">${s.n}</span>
-      <span><b>${s.title}</b> — ${s.heading || ''}<br>
+      <span><b>${s.title}</b>${h}<br>
         <span style="font-size:11px;color:var(--dimmer)">${s.path}</span></span>
-    </button>`).join('');
+    </button>`;
+  }).join('');
 }
 
 /* ----------------------------------------------------------------- misc */
@@ -293,7 +315,7 @@ document.addEventListener('click', (e) => {
 
   switch (t.dataset.act) {
     case 'search': openPalette(); break;
-    case 'ask': $('#ask').classList.add('open'); $('#ask-q').focus(); break;
+    case 'ask': openAsk(); break;
     case 'send': ask($('#ask-q').value); break;
     case 'reset': orbit.reset(); toast('view reset'); break;
     case 'zin': orbit.zoom(1.25); break;
@@ -340,9 +362,12 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (typing) return;
+  // preventDefault on every shortcut that focuses a field. Without it the
+  // keystroke that opened the panel also lands *in* the field, so pressing `a`
+  // to ask a question seeded every question with a stray "a".
   if (e.key === '/') { e.preventDefault(); openPalette(); }
-  else if (e.key === 'a') { $('#ask').classList.add('open'); $('#ask-q').focus(); }
-  else if (e.key === '?') $('#help').classList.toggle('open');
+  else if (e.key === 'a') { e.preventDefault(); openAsk(); }
+  else if (e.key === '?') { e.preventDefault(); $('#help').classList.toggle('open'); }
   else if (e.key === '0') orbit.reset();
   else if (e.key === '+' || e.key === '=') orbit.zoom(1.25);
   else if (e.key === '-') orbit.zoom(1 / 1.25);

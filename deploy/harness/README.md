@@ -24,7 +24,21 @@ browser ──► SSH tunnel ──► jm-harness :3080   the agent UI  (no auth
                            brain/*.md
 ```
 
-The harness has **no filesystem access to `brain/`**. Its systemd unit could not write a note if it tried. Every change goes over MCP and through the jail, so there is exactly one code path that mutates the vault and one place to audit.
+The vault is **read-only to the harness process**, enforced by the unit's sandbox rather than by policy: `ReadWritePaths` lists the agent's scratch workspace and DSH's own state, and nothing else on the box. The only route that can change `brain/` is MCP — over loopback, through the jail, into a git commit.
+
+That distinction matters, because DSH composes its own `bash`, `fs` and `str-replace-editor` tools. They reach the filesystem directly and know nothing about `server/authoring.py`. The first version of this unit used the repo as its working directory *and* put it in `ReadWritePaths`, so those tools could edit `brain/` and append to `AGENTS.md` straight past the jail — verified with a probe, not theorised. The jail was guarding a door that was no longer the only one.
+
+`server/.env` is in `InaccessiblePaths`, so an agent with a shell cannot read your OpenRouter key, login hash or session secret out of it. `install-harness.sh` re-checks all of this on every run and warns loudly if a write succeeds.
+
+**What is still reachable, honestly:** the agent runs with `OPENROUTER_API_KEY` and `AGENTOS_MCP_TOKEN` in its environment, because the provider route and the MCP header resolve them from there. Anything with a shell can read its own `/proc/self/environ`. The MCP token is not an escalation — it grants exactly the tools the agent already has — but the OpenRouter key is a real credential. If that is unacceptable, drop DSH's shell and filesystem tools; the vault tools do not depend on them:
+
+```yaml
+# add to jm-agentic-os.cordis.yml
+- id: tool-bash
+  config: { enabled: false }
+- id: tool-fs
+  config: { enabled: false }
+```
 
 ## The pieces
 

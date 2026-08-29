@@ -68,7 +68,7 @@ OPENROUTER_API_KEY=sk-or-...
 
 ## Reaching it
 
-Loopback by default, and that is not laziness — **the DSH web app has no authentication**. No password, no token, no session. It assumes it is bound to localhost on a machine you control.
+Loopback by default, and that is not laziness — **the published DSH web app has no authentication**. No password, no token, no session. It assumes it is bound to localhost on a machine you control, and it enforces that assumption for anything that touches configuration or secrets: see [the configuration plane is loopback-only](#the-configuration-plane-is-loopback-only-and-no-setting-changes-that). Serving it publicly therefore gives you a working chat surface with a read-only settings surface, which is worth knowing before you decide the proxy is enough.
 
 ```sh
 ssh -N -L 3080:127.0.0.1:3080 ec2-user@<host>
@@ -117,6 +117,60 @@ What is done about it:
 - Damage is bounded by everything in the list above: no path escape, no self-modification, append-only journal, write caps, and a git commit per change.
 
 None of this makes injection impossible. All of it makes the outcome bounded, visible and revertable. If you want a stronger guarantee, the honest one is to not give a web-exposed agent write access at all — drop the write tools from `TOOLS` in `server/mcp.py` and it becomes read-only.
+
+## The configuration plane is loopback-only, and no setting changes that
+
+The single most surprising thing about running this behind a proxy. Over the public URL, the Models page fails with
+
+```
+Loading the provider directory failed: settings are unavailable in this browser
+```
+
+and the workspace picker cannot open a directory chooser. Nothing is broken. DSH gates a specific set of methods to a loopback `Host` **unconditionally** — `trustedHosts` and `--trusted-host` do not affect them, because the fence is a DNS-rebinding defence rather than authentication. Its own source says so:
+
+> `trustedHosts` is a DNS-rebinding fence, explicitly not authentication, so the whole configuration plane stays loopback-same-origin until a real authentication layer exists.
+
+Measured on this deployment, same socket, only the `Host` header differing:
+
+| Method | via the public host | via `127.0.0.1` |
+|---|---:|---:|
+| `settings.describe` / `mutate` / `update` / `replace` | **403** | 200 |
+| `credentials.describe` / `set` / `unset` | **403** | 200 |
+| `llm.discoverModels` | **403** | 200 |
+| `agentPreset.read` / `copy` / `remove` / `openDocument` | **403** | 200 |
+| `host.pickDirectory` / `openPath` | **403** | 200 |
+| `llm.providers` / `llm.models` | 200 | 200 |
+
+The last row is why the model *list* renders but you cannot *add* one: reading the catalogue carries no endpoints or key state, so it is deliberately allowed, while everything that reads or writes configuration and secrets is not. `settings.describe` would expose every namespace's configuration and `credentials.describe` reports whether an arbitrary environment variable is set and where from — reconnaissance for an anonymous caller.
+
+Note this is version-specific. The published `0.1.1-rc.2` has **no browser authentication at all**, which is exactly why the config plane is closed. Newer unreleased builds add a launch-token cookie, which is the "real authentication layer" that comment is waiting for; expect this restriction to relax once that ships.
+
+### So how do you change settings?
+
+**Either reach it over loopback** — an SSH tunnel makes the browser's `Host` `127.0.0.1`, and every pane above works, including Models, credentials, presets and the directory picker:
+
+```sh
+ssh -N -L 3080:127.0.0.1:3080 ec2-user@<host>
+# then open http://127.0.0.1:3080  (no password — Caddy is not in the path)
+```
+
+**Or edit the file**, which is hot-reloaded and needs no restart. `$DSH_HOME/settings.yaml` is the same document the Models page writes:
+
+```yaml
+llm-pi-ai:
+  providers:
+    openrouter:
+      api: openai-completions
+      baseURL: https://openrouter.ai/api/v1
+      apiKeyEnv: OPENROUTER_API_KEY
+      models:
+        - id: anthropic/claude-sonnet-4.5     # any OpenRouter model id
+          name: Claude Sonnet 4.5
+          contextWindow: 200000
+          maxTokens: 8192
+```
+
+Adding a whole new provider is the same shape with a new route key — then set `provider:` on the `agent-default-model` row in the overlay, or pick it in the UI over the tunnel. A route the pi-ai catalogue does not ship needs `api`, `baseURL` and a non-empty `models` list, or it is refused where it is written.
 
 ## Where to put things
 

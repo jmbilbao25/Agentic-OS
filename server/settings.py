@@ -162,6 +162,12 @@ SCHEMA = [
            "when the query looks like it is naming a note. On the 16-probe "
            "benchmark: 0 scores top-1 7/16, and 0.08 scores 12/16 — the smallest "
            "value that reaches the plateau. 0 disables it."),
+    F("W_TITLE_EXACT", "float", 0.45, lo=0.0, hi=2.0, step=0.05,
+      group="retrieval", label="Exact-name boost",
+      help="Applied instead of the nudge when the query matches a note's whole "
+           "name. Typing a full name is navigation, not search: you know which "
+           "document you want. Kept separate because raising the nudge enough to "
+           "win a navigational case over-boosts every fuzzy match too."),
     F("POOL_MULT", "int", 6, lo=1, hi=30,
       group="retrieval", label="Candidate pool multiplier",
       help="How deep each ranking goes before fusion."),

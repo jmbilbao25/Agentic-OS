@@ -73,13 +73,15 @@ say "building the search index"
 
 # ---------------------------------------------------------------- 7. systemd
 say "installing systemd units"
-for unit in agentos.service agentos-sync.service agentos-sync.timer; do
+for unit in agentos.service agentos-sync.service agentos-sync.timer \
+            agentos-radar.service agentos-radar.timer; do
   sed -e "s|__DIR__|$DIR|g" -e "s|__USER__|$USER|g" \
       "deploy/systemd/$unit" | sudo tee "/etc/systemd/system/$unit" >/dev/null
 done
 sudo systemctl daemon-reload
 sudo systemctl enable -q --now agentos.service
 sudo systemctl enable -q --now agentos-sync.timer
+sudo systemctl enable -q --now agentos-radar.timer
 
 sleep 3
 if curl -fsS --max-time 5 http://127.0.0.1:8000/healthz >/dev/null; then
@@ -88,12 +90,65 @@ else
   say "app did NOT come up — journalctl -u agentos -n 40 --no-pager"
 fi
 
-# ---------------------------------------------------------------- 8. tailscale
-if ! command -v tailscale >/dev/null; then
+# ---------------------------------------------------------------- 8. TLS
+# Real certificate, no domain purchase, no interactive login. sslip.io resolves
+# <anything>-<dashed-ip>.sslip.io to that IP, and Let's Encrypt issues for it over
+# HTTP-01. Verified in production: ssl_verify_result=0 from outside the host.
+# Requires ports 80 and 443 open in the security group.
+if [ "${TLS:-caddy}" = "caddy" ]; then
+  IP="$(curl -fsS --max-time 5 https://checkip.amazonaws.com | tr -d '\n' || true)"
+  HOST="${AGENTOS_PUBLIC_HOST:-${NAME_PREFIX:-jm-agentic-os}-${IP//./-}.sslip.io}"
+
+  if [ -z "$IP" ]; then
+    say "could not determine the public IP — skipping TLS. Set AGENTOS_PUBLIC_HOST and re-run."
+  else
+    say "TLS for https://$HOST"
+    if ! command -v caddy >/dev/null; then
+      sudo dnf -y -q install 'dnf-command(copr)' >/dev/null 2>&1 || true
+      sudo dnf -y -q copr enable @caddy/caddy epel-9-x86_64 >/dev/null 2>&1 || true
+      sudo dnf -y -q install caddy >/dev/null 2>&1 || true
+    fi
+    if command -v caddy >/dev/null; then
+      # Serve the bare-IP name too, so older links keep working.
+      sed -e "s|__HOST__|$HOST, ${IP//./-}.sslip.io|g" -e "s|__EMAIL__|admin@$HOST|g" \
+        deploy/Caddyfile | sudo tee /etc/caddy/Caddyfile >/dev/null
+      sudo caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
+        && say "Caddyfile valid" || say "Caddyfile INVALID — check before trusting TLS"
+      sudo systemctl enable -q --now caddy
+      sudo systemctl restart caddy
+
+      say "waiting for certificate issuance (needs :80 and :443 open)"
+      for _ in $(seq 1 45); do
+        L=$(sudo journalctl -u caddy --since '-4min' --no-pager 2>/dev/null || true)
+        case "$L" in
+          *"certificate obtained successfully"*) say "certificate obtained"; break ;;
+          *"could not get certificate"*|*"too many failed"*)
+            say "issuance FAILED — is :80 open? journalctl -u caddy"; break ;;
+        esac
+        sleep 3
+      done
+
+      sed -i "s|^AGENTOS_BASE_URL=.*|AGENTOS_BASE_URL=https://$HOST|" server/.env
+      sudo systemctl restart agentos
+      sleep 4
+      if curl -fsS --max-time 10 "https://$HOST/healthz" >/dev/null 2>&1; then
+        say "HTTPS live: https://$HOST"
+      else
+        say "HTTPS not answering yet — journalctl -u caddy -n 30"
+      fi
+    else
+      say "Caddy unavailable — the app stays loopback-only, so nothing is exposed."
+    fi
+  fi
+fi
+
+# Tailscale remains an alternative: set TLS=tailscale to skip Caddy entirely and
+# publish over Funnel instead, which needs no inbound ports but does need a login.
+if [ "${TLS:-caddy}" = "tailscale" ] && ! command -v tailscale >/dev/null; then
   say "installing Tailscale"
   sudo dnf -y -q config-manager --add-repo \
     https://pkgs.tailscale.com/stable/amazon-linux/2/tailscale.repo 2>/dev/null || true
-  sudo dnf -y -q install tailscale || say "install Tailscale manually: https://tailscale.com/download/linux"
+  sudo dnf -y -q install tailscale || say "install manually: https://tailscale.com/download/linux"
   sudo systemctl enable -q --now tailscaled || true
 fi
 
@@ -127,15 +182,24 @@ Remaining steps — these need your accounts, so they cannot be scripted.
    Or leave the key out and set it later in the UI under Settings, where it
    is written to settings.local.json with mode 600 instead of sitting in .env.
 
-4. Restart and verify:
+4. TLS is already set up above by Caddy + Let's Encrypt on
+   <prefix>-<dashed-ip>.sslip.io. Verify it:
+
+     curl -fsS https://$(curl -fsS https://checkip.amazonaws.com | tr . -).sslip.io/healthz
+
+   Own a domain later? Point it here and re-run with:
+     AGENTOS_PUBLIC_HOST=notes.example.com bash deploy/provision.sh
+
+   Prefer no inbound ports at all? TLS=tailscale bash deploy/provision.sh
+
+5. Restart after any .env edit, then check the negative case, which is the test
+   that actually proves anything: open the site in a private window and confirm
+   a wrong password is refused, and that eight wrong attempts lock the address
+   out.
+
      sudo systemctl restart agentos
-     curl -fsS https://<host>.ts.net/healthz
 
-   Then check the negative case, which is the test that actually proves
-   anything: open the site in a private window and confirm a wrong password
-   is refused, and that eight wrong attempts lock the address out.
-
-5. Confirm no credential ever reached git:
+6. Confirm no credential ever reached git:
      bash bin/os selftest
 
 Useful:

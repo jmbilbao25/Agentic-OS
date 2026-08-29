@@ -1,0 +1,16 @@
+[Unit]
+Description=AgentOS — daily AI radar + digest
+Documentation=https://github.com/jmbilbao25/Agentic-OS
+
+[Timer]
+# Once a day, early. The capture is a day's worth of signal; running it more
+# often produces near-identical files and more to triage, which is the failure
+# mode this whole layer exists to avoid.
+OnCalendar=*-*-* 06:15:00
+Persistent=true
+RandomizedDelaySec=600
+
+Unit=agentos-radar.service
+
+[Install]
+WantedBy=timers.target

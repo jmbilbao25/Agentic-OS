@@ -1,0 +1,1 @@
+../../config/steering/30-lazy-senior.md

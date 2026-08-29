@@ -1,27 +1,36 @@
 """The visual second brain.
 
-Read-only over the vault by design: this app renders and searches markdown, it
-never authors it. Writing is `bin/os`, so that every change to memory goes through
-git and stays reviewable. See brain/wiki/Git Is The Disk.md
+Read-only over the vault by design: this app renders, searches and reasons over
+markdown, it never authors it. Writing is `bin/os`, so that every change to memory
+goes through git and stays reviewable. See brain/wiki/Git Is The Disk.md
+
+The one exception is settings.local.json, which is machine state rather than
+memory — it holds an API key and a model choice, neither of which belongs in a
+git history.
 """
+import asyncio
+import json
 import logging
 import secrets
 import subprocess
-from pathlib import Path
+from typing import AsyncGenerator
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                RedirectResponse, StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import auth, config, embed, llm, search, vault
+from . import auth, config, embed, gauntlet, llm, search, settings, vault
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("agentos")
 
-app = FastAPI(title="AgentOS Second Brain", docs_url=None, redoc_url=None)
+# No schema endpoints: there is no third-party client to generate one for, and
+# an unauthenticated /openapi.json would enumerate the whole API for free.
+app = FastAPI(title="AgentOS Second Brain", docs_url=None, redoc_url=None,
+              openapi_url=None)
 
 app.add_middleware(
     SessionMiddleware,
@@ -38,6 +47,30 @@ if config.STATIC.is_dir():
     app.mount("/static", StaticFiles(directory=str(config.STATIC)), name="static")
 
 
+# Everything is same-origin and there is no third-party anything, so the policy
+# can be tight. No 'unsafe-inline' for scripts or styles: the UI uses external
+# files and the CSSOM, never a style attribute or an inline handler.
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; "
+       "img-src 'self' data:; font-src 'self'; connect-src 'self'; "
+       "form-action 'self'; base-uri 'none'; frame-ancestors 'none'; "
+       "object-src 'none'")
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    r = await call_next(request)
+    r.headers.setdefault("Content-Security-Policy", CSP)
+    r.headers.setdefault("X-Content-Type-Options", "nosniff")
+    r.headers.setdefault("Referrer-Policy", "no-referrer")
+    r.headers.setdefault("X-Frame-Options", "DENY")
+    r.headers.setdefault("Permissions-Policy",
+                         "geolocation=(), camera=(), microphone=()")
+    if config.BASE_URL.startswith("https"):
+        r.headers.setdefault("Strict-Transport-Security",
+                             "max-age=31536000; includeSubDomains")
+    return r
+
+
 @app.on_event("startup")
 async def startup():
     for p in config.problems():
@@ -46,11 +79,26 @@ async def startup():
         log.warning("SESSION_SECRET unset — using an ephemeral key; sessions drop "
                     "on restart")
     log.info("vault=%s db=%s", config.VAULT, config.DB)
+    log.info("provider=%s model=%s", settings.get("LLM_BASE_URL"),
+             settings.get("LLM_MODEL"))
     embed.warm()
 
 
 def user(request: Request):
     return auth.require(request)
+
+
+# ---------------------------------------------------------------- SSE plumbing
+
+def _frame(event: str, data) -> str:
+    return "event: %s\ndata: %s\n\n" % (event, json.dumps(data))
+
+
+def _sse(gen: AsyncGenerator) -> StreamingResponse:
+    return StreamingResponse(gen, media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "Connection": "keep-alive",
+                                      "X-Accel-Buffering": "no"})
 
 
 # ---------------------------------------------------------------- public routes
@@ -69,10 +117,10 @@ async def root(request: Request):
     if not idx.is_file():
         return HTMLResponse("<h1>AgentOS</h1><p>static/index.html missing</p>",
                             status_code=500)
-    return FileResponse(str(idx))
+    return FileResponse(str(idx), headers={"Cache-Control": "no-store"})
 
 
-# --------------------------------------------------------------- authed API
+# -------------------------------------------------------------------- status
 
 @app.get("/api/status")
 async def status(u=Depends(user)):
@@ -80,19 +128,41 @@ async def status(u=Depends(user)):
         "user": u,
         "index": search.index_status(),
         "vault": str(config.VAULT),
-        "model": config.LLM_MODEL,
-        "provider": config.LLM_BASE_URL,
+        "model": settings.get("LLM_MODEL"),
+        "provider": settings.get("LLM_BASE_URL"),
+        "is_openrouter": llm.is_openrouter(),
         "llm_configured": llm.configured(),
+        "reindex_pending": settings.reindex_pending(),
+        "repo_url": settings.get("REPO_URL"),
+        "ui": {
+            "reduced_motion": settings.get("UI_REDUCED_MOTION"),
+            "orbit_spin": settings.get("UI_ORBIT_SPIN"),
+            "label_density": settings.get("UI_LABEL_DENSITY"),
+        },
+        "gauntlet": {
+            "builder": settings.get("GAUNTLET_BUILDER_MODEL")
+                       or settings.get("LLM_MODEL"),
+            "critic": settings.get("GAUNTLET_CRITIC_MODEL")
+                      or settings.get("LLM_MODEL"),
+            "ceiling": settings.get("GAUNTLET_MAX_ROUNDS"),
+        },
         "problems": config.problems(),
     }
 
+
+# --------------------------------------------------------------------- vault
 
 @app.get("/api/graph")
 async def api_graph(u=Depends(user)):
     """The whole vault as nodes + edges. Small enough to send at once — a
     personal vault is thousands of files, not millions."""
-    docs = vault.load() + vault.load_system()
+    docs = vault.load_all()
     edges, missing = vault.graph(docs)
+
+    backlinks = {}
+    for e in edges:
+        backlinks.setdefault(e["target"], []).append(e["source"])
+
     nodes = []
     for d in docs:
         nodes.append({
@@ -100,6 +170,7 @@ async def api_graph(u=Depends(user)):
             "path": d.path, "tags": d.tags, "links": d.links,
             "size": d.size, "mtime": d.mtime,
             "words": len(d.body.split()),
+            "backlinks": len(backlinks.get(d.id, [])),
             "excerpt": d.body[:220].replace("\n", " ").strip(),
         })
     return {"nodes": nodes, "edges": edges, "missing": missing,
@@ -108,10 +179,37 @@ async def api_graph(u=Depends(user)):
 
 @app.get("/api/doc")
 async def api_doc(id: str, u=Depends(user)):
-    for d in vault.load():
-        if d.id == id:
-            return d.public()
-    raise HTTPException(404, "no document %r" % id)
+    """One document, plus what points at it.
+
+    Reads load_all() so the kernel and the skills open like anything else — they
+    are on the map, so they have to be openable from it.
+    """
+    docs = vault.load_all()
+    doc = next((d for d in docs if d.id == id), None)
+    if doc is None:
+        raise HTTPException(404, "no document %r" % id)
+
+    edges, _ = vault.graph(docs)
+    by_id = {d.id: d for d in docs}
+
+    def brief(doc_id):
+        d = by_id.get(doc_id)
+        return None if d is None else {"id": d.id, "title": d.title,
+                                       "layer": d.layer, "ring": d.ring}
+
+    payload = doc.public()
+    payload["backlinks"] = [b for b in
+                            (brief(e["source"]) for e in edges
+                             if e["target"] == id) if b]
+    payload["outgoing"] = [b for b in
+                           (brief(e["target"]) for e in edges
+                            if e["source"] == id) if b]
+    payload["words"] = len(doc.body.split())
+
+    repo = settings.get("REPO_URL")
+    if repo:
+        payload["repo_url"] = "%s/blob/main/%s" % (repo.rstrip("/"), doc.path)
+    return payload
 
 
 @app.get("/api/search")
@@ -120,54 +218,156 @@ async def api_search(q: str, k: int = 0, layers: str = "", u=Depends(user)):
                          layers=[l for l in layers.split(",") if l] or None)
 
 
+# ----------------------------------------------------------------------- ask
+
 @app.post("/api/ask")
 async def api_ask(request: Request, u=Depends(user)):
     body = await request.json()
     question = (body.get("q") or "").strip()
     if not question:
         raise HTTPException(400, "empty question")
+    model = (body.get("model") or "").strip() or None
 
-    found = search.search(question, top_k=body.get("k") or config.TOP_K)
+    found = search.search(question, top_k=body.get("k") or settings.get("TOP_K"))
     hits = found["hits"]
     messages = llm.build_prompt(question, hits)
 
     async def gen():
         # Citations first so the UI can render sources before the answer streams.
-        import json as _json
-        yield "event: sources\ndata: %s\n\n" % _json.dumps([
+        yield _frame("sources", [
             {"n": i, "title": h["title"], "path": h["path"], "doc_id": h["doc_id"],
-             "heading": h["heading"], "layer": h["layer"], "matched": h["matched"]}
+             "heading": h["heading"], "layer": h["layer"], "matched": h["matched"],
+             "text": h["text"][:600]}
             for i, h in enumerate(hits, 1)])
-        async for delta in llm.stream(messages):
-            yield "event: delta\ndata: %s\n\n" % _json.dumps(delta)
-        yield "event: done\ndata: {}\n\n"
+        yield _frame("retrieval", {"mode": found.get("mode"),
+                                   "counts": found.get("counts")})
+        try:
+            async for ev in llm.stream(messages, model=model):
+                yield _frame(ev.get("type", "delta"), ev)
+        except asyncio.CancelledError:      # client closed the tab mid-answer
+            raise
+        yield _frame("done", {})
 
-    return StreamingResponse(gen(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache",
-                                      "X-Accel-Buffering": "no"})
+    return _sse(gen())
 
+
+# ------------------------------------------------------------------ gauntlet
+
+@app.post("/api/gauntlet/bar")
+async def api_gauntlet_bar(payload: dict = Body(...), u=Depends(user)):
+    """Fetch a reference artifact so you can see what the critic will see.
+
+    Separate from the run because a bar that turns out to be a JavaScript shell
+    should fail before you spend a builder round on it.
+    """
+    url = (payload.get("url") or "").strip()
+    if not url:
+        raise HTTPException(400, "no url")
+    res = await gauntlet.fetch_bar(url)
+    if res.get("error"):
+        return JSONResponse({"error": res["error"]}, status_code=400)
+    text = res["text"]
+    return {"title": res["title"], "chars": len(text),
+            "preview": text[:1200], "text": text}
+
+
+@app.post("/api/gauntlet")
+async def api_gauntlet(request: Request, u=Depends(user)):
+    body = await request.json()
+
+    async def gen():
+        bar_text = (body.get("bar") or "").strip()
+        bar_label = (body.get("bar_label") or "").strip() or "the reference"
+
+        url = (body.get("bar_url") or "").strip()
+        if url and not bar_text:
+            yield _frame("phase", {"phase": "fetching", "url": url})
+            got = await gauntlet.fetch_bar(url)
+            if got.get("error"):
+                yield _frame("error", {"type": "error", "message": got["error"]})
+                yield _frame("done", {"won": False})
+                return
+            bar_text = got["text"]
+            bar_label = got["title"] or url
+            yield _frame("bar", {"title": bar_label, "chars": len(bar_text)})
+
+        async for ev in gauntlet.run(
+                (body.get("goal") or ""), bar_text, bar_label=bar_label,
+                builder_model=(body.get("builder_model") or "").strip() or None,
+                critic_model=(body.get("critic_model") or "").strip() or None,
+                max_rounds=body.get("max_rounds") or None,
+                top_k=body.get("k") or None):
+            yield _frame(ev.get("type", "notice"), ev)
+
+    return _sse(gen())
+
+
+# ------------------------------------------------------------------- settings
+
+@app.get("/api/settings")
+async def api_settings(u=Depends(user)):
+    return settings.public()
+
+
+@app.put("/api/settings")
+async def api_settings_put(patch: dict = Body(...), u=Depends(user)):
+    changed, errors = settings.update(patch)
+    if errors:
+        return JSONResponse({"errors": errors, "changed": []}, status_code=422)
+
+    # An embedding change makes the loaded model wrong, not just the index.
+    if any(k.startswith("EMBED_") for k in changed):
+        embed.invalidate()
+
+    return {"changed": changed,
+            "restart_required": settings.restart_required(changed),
+            "reindex_pending": settings.reindex_pending(),
+            "settings": settings.public()}
+
+
+@app.post("/api/settings/reset")
+async def api_settings_reset(payload: dict = Body(default={}), u=Depends(user)):
+    keys = payload.get("keys") or None
+    cleared = settings.reset(keys)
+    if any(k.startswith("EMBED_") for k in cleared):
+        embed.invalidate()
+    return {"cleared": cleared, "settings": settings.public()}
+
+
+@app.get("/api/models")
+async def api_models(refresh: bool = False, u=Depends(user)):
+    res = await llm.list_models(force=refresh)
+    res["current"] = settings.get("LLM_MODEL")
+    res["fallbacks"] = settings.get("LLM_FALLBACK_MODELS")
+    return res
+
+
+# -------------------------------------------------------------- index / sync
 
 @app.post("/api/reindex")
-async def api_reindex(u=Depends(user)):
+async def api_reindex(full: bool = False, u=Depends(user)):
     from .index import build
-    return build(full=False)
+    return await asyncio.to_thread(build, full)
 
 
 @app.post("/api/sync")
 async def api_sync(u=Depends(user)):
     """git pull, then reindex. The button version of the cron job."""
     try:
-        out = subprocess.run(["git", "pull", "--ff-only"], cwd=str(config.ROOT),
-                             capture_output=True, text=True, timeout=60)
+        out = await asyncio.to_thread(
+            subprocess.run, ["git", "pull", "--ff-only"],
+            capture_output=True, text=True, timeout=60, cwd=str(config.ROOT))
         pull = (out.stdout + out.stderr).strip()
+        ok = out.returncode == 0
     except Exception as e:                          # noqa: BLE001
-        pull = "git pull failed: %s" % e
+        pull, ok = "git pull failed: %s" % e, False
     from .index import build
-    return {"pull": pull, "index": build(full=False)}
+    return {"pull": pull, "pull_ok": ok,
+            "index": await asyncio.to_thread(build, False)}
 
 
 @app.exception_handler(HTTPException)
 async def on_http_error(request: Request, exc: HTTPException):
     if exc.status_code == 401 and not request.url.path.startswith("/api/"):
-        return RedirectResponse("/auth/login")
+        return RedirectResponse("/auth/login?next=%s" % request.url.path)
     return JSONResponse({"error": exc.detail}, status_code=exc.status_code)

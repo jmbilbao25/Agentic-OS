@@ -6,6 +6,7 @@ read it is a vault that will one day be unreadable.
 """
 import json
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -330,8 +331,74 @@ def cmd_selftest(_):
         for link in WIKILINK.findall(prose):
             check(link.strip() in names, f"{p.name}: broken wikilink [[{link.strip()}]]")
 
+    # No secrets in tracked files.
+    #
+    # This repo's whole premise is that memory lives in git, which means anything
+    # that lands here is durable, pushed, and effectively public the moment the
+    # remote is. A private key or an API key committed by accident is not fixed by
+    # deleting it in a later commit. Scans only files git is actually tracking, so
+    # an ignored server/.env is correctly invisible.
+    for rel, why in scan_secrets():
+        check(False, f"{rel}: {why} — remove it, rotate the credential, and keep it "
+                     f"out of git (server/.env and server/settings.local.json are "
+                     f"gitignored for this)")
+
     print("\n".join(f"FAIL  {m}" for m in fails) if fails else "ok — vault well-formed")
     sys.exit(1 if fails else 0)
+
+
+# Signatures, not entropy heuristics: a false positive that cries wolf on every
+# base64 string gets the whole check switched off within a week.
+SECRET_PATTERNS = [
+    (re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"),
+     "contains a private key"),
+    (re.compile(r"\bsk-or-v1-[A-Za-z0-9]{16,}"), "contains an OpenRouter API key"),
+    (re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9]{32,}"), "contains an OpenAI API key"),
+    (re.compile(r"\b(?:ghp|gho|ghs|ghu)_[A-Za-z0-9]{30,}"),
+     "contains a GitHub token"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "contains an AWS access key id"),
+    (re.compile(r"\bxox[abposr]-[A-Za-z0-9-]{10,}"), "contains a Slack token"),
+    # dotenv shape only — no spaces around '=', no call syntax in the value. A
+    # looser pattern matched `SESSION_SECRET = os.getenv("SESSION_SECRET", "")` in
+    # config.py, and a check that fires on ordinary code is a check somebody turns
+    # off.
+    (re.compile(r"^AGENTOS_PASSWORD=[^\s#'\"()]+$", re.M),
+     "sets a plaintext password (use AGENTOS_PASSWORD_HASH)"),
+    (re.compile(r"^SESSION_SECRET=[^\s#'\"()]{16,}$", re.M),
+     "sets a real SESSION_SECRET"),
+]
+
+# Files whose job is to *describe* these patterns.
+SECRET_ALLOW = {"bin/osutil.py", "server/.env.example",
+                "config/steering/30-lazy-senior.md"}
+
+
+def scan_secrets():
+    """Yield (path, reason) for every tracked file that looks like it holds a
+    credential. Text files only, and skips anything too large to be config."""
+    try:
+        out = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT,
+                             capture_output=True, text=True, timeout=30)
+        if out.returncode != 0:
+            return
+        paths = [p for p in out.stdout.split("\0") if p]
+    except (OSError, subprocess.SubprocessError):
+        return
+
+    for rel in paths:
+        if rel in SECRET_ALLOW:
+            continue
+        p = ROOT / rel
+        try:
+            if not p.is_file() or p.stat().st_size > 512_000:
+                continue
+            text = p.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue                      # binary or unreadable: nothing to match
+        for pat, why in SECRET_PATTERNS:
+            if pat.search(text):
+                yield rel, why
+                break
 
 
 CMDS = {"loop-status": cmd_loop_status, "loop-next": cmd_loop_next, "loop-done": cmd_loop_done,

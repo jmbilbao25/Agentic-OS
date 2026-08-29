@@ -14,7 +14,7 @@ import struct
 import sys
 import time
 
-from . import config, embed, vault
+from . import config, embed, settings, vault
 
 log = logging.getLogger("agentos.index")
 
@@ -72,7 +72,7 @@ def build(full=False):
     db.executescript(SCHEMA)
     vec_ok = load_vec(db)
 
-    docs = vault.load()
+    docs = vault.load_all()
     if not docs:
         log.warning("no documents found under %s", config.VAULT)
 
@@ -141,12 +141,31 @@ def build(full=False):
             db.commit()
             log.info("embedded %d/%d", embedded, len(pending))
 
-    mode = "hybrid" if (vec_ok and embedded) else "keyword"
+    # A rebuild that embedded nothing because nothing changed is still hybrid, so
+    # trust the vector count in the table rather than this run's activity.
+    have_vectors = 0
+    if vec_ok:
+        try:
+            have_vectors = db.execute(
+                "SELECT COUNT(*) c FROM chunks_vec").fetchone()["c"]
+        except sqlite3.OperationalError:
+            have_vectors = 0
+    mode = "hybrid" if (vec_ok and have_vectors) else "keyword"
+
     for k, v in (("built", str(int(time.time()))), ("mode", mode),
                  ("docs", str(len(docs))), ("embed_model", config.EMBED_MODEL),
+                 ("embed_dim", str(config.EMBED_DIM)),
+                 ("chunk_chars", str(config.CHUNK_CHARS)),
+                 ("chunk_overlap", str(config.CHUNK_OVERLAP)),
                  ("vault", str(config.VAULT))):
         db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (k, v))
     db.commit()
+
+    # The index now reflects the current embedding settings, so the "stale index"
+    # nag can go away. Only after a full rebuild: an incremental pass skips
+    # unchanged files and would leave old chunk sizes in place.
+    if full:
+        settings.clear_reindex_pending()
 
     total = db.execute("SELECT COUNT(*) c FROM chunks").fetchone()["c"]
     vtotal = (db.execute("SELECT COUNT(*) c FROM chunks_vec").fetchone()["c"]

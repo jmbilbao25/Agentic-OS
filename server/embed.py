@@ -50,6 +50,20 @@ def available() -> bool:
     return _model is not None
 
 
+def invalidate():
+    """Forget the loaded model so the next call picks up a settings change.
+
+    Toggling semantic search off and back on, or switching embedding model, has to
+    take effect without a restart or the settings panel is lying about what it
+    controls. Changing the *model* still needs a reindex — the old vectors are
+    from a different space — which settings.py flags separately.
+    """
+    global _model, _state
+    with _lock:
+        _model, _state = None, "cold"
+    log.info("embedding model invalidated — will reload on next use")
+
+
 def status() -> dict:
     return {"model": config.EMBED_MODEL, "dim": config.EMBED_DIM,
             "state": _state, "available": _model is not None}

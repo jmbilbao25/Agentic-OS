@@ -18,7 +18,7 @@ bin/os               the runtime — boot, capture, recall, loops, save
 config/              portable steering + skills, plus the global kernel
 adapters/install.sh  generates per-harness bindings from AGENTS.md
 brain/               the vault — raw → wiki → output, plus loops and journal
-server/              the visual second brain: hybrid search, RAG, orbit UI
+server/              the visual second brain: hybrid search, RAG, gauntlet, orbit UI
 deploy/              always-on provisioning for a $10/mo box
 docs/index.html      generated static dashboard (GitHub Pages)
 ```
@@ -104,23 +104,35 @@ bin/os selftest                 # vault well-formed? bindings in sync?
 ## The visual second brain
 
 `server/` is a small FastAPI app that renders the vault as an interactive orbit map —
-concentric ARMS rings, category clusters, `/` to fuzzy-search, click to preview — and
-answers questions over it with citations.
+concentric ARMS rings, `/` to search, click to read, `j`/`k` to walk the link graph —
+answers questions over it with citations, and runs a build-and-critique loop against a
+real reference.
 
 Retrieval is **hybrid**: SQLite FTS5 (BM25) for keywords, `sqlite-vec` for semantics,
-fused with Reciprocal Rank Fusion. Embeddings are a quantised MiniLM running on CPU.
-No Postgres, no vector service, no daemon — the index is a single file, rebuilt from
-markdown and thrown away whenever you like.
+fused with weighted Reciprocal Rank Fusion, plus a bounded nudge for queries that look
+like they are *naming* a note — because neither half of a hybrid ranker can see a
+title, which made "type the note's name" the search it was worst at. Embeddings are a
+quantised BGE-small running on CPU. No Postgres, no vector service, no daemon — the
+index is a single file, rebuilt from markdown and thrown away whenever you like.
 
 ```bash
-cd server
-cp .env.example .env      # add Google OAuth + OPENROUTER_API_KEY
-pip install -r requirements.txt
-python -m server.index    # build the index
-uvicorn server.app:app --port 8000
+pip install -r server/requirements.txt
+cp server/.env.example server/.env
+python -m server.passwd           # mint a username + password hash, paste into .env
+python -m server.index --full
+server/tools/devserve.sh          # http://127.0.0.1:8000
+python -m server.tools.smoke      # 37 end-to-end checks
 ```
 
-Auth is Google OAuth with a single-account allowlist. See `server/README.md`.
+Auth is **one username and one password**, hashed with PBKDF2 from the standard
+library. No registration, no reset, no second account — see `server/README.md` for the
+threat model and what it does and does not defend against.
+
+Everything worth tuning while looking at the result — provider, model, fallback chain,
+temperature, retrieval weights, motion — is editable in the UI without a restart, and
+the settings form is generated from the server's own schema so it cannot drift from the
+backend. Bring an OpenRouter key and the model picker filters the whole live catalogue
+with context length and price per million tokens.
 
 ## Always-on
 

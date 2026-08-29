@@ -12,7 +12,7 @@ laptop is shut. Nothing here authors memory; writing is still `bin/os`.
 | Cost | ~$10/month (≈$7.60 compute + ≈$2.40 disk) |
 | TLS | Tailscale Funnel — real certificate, stable hostname, **no domain purchase** |
 | Inbound ports | **22 only**, from your IP. The web app is never publicly bound. |
-| Auth | Google OAuth, single-email allowlist |
+| Auth | one username + one PBKDF2-hashed password, with per-address lockout |
 | Routines | `systemd` timer: `git pull` + incremental reindex every 15 min |
 | Recovery | `systemd` restarts on crash and on reboot |
 
@@ -30,7 +30,7 @@ ssh -i agentos-key.pem ec2-user@<ip> 'bash provision.sh'
 `provision.sh` is idempotent — re-run it after any `git pull`.
 
 Then finish the three things a script cannot do for you: `tailscale up` +
-`tailscale funnel --bg 8000`, create the Google OAuth client, and paste the
+`tailscale funnel --bg 8000`, run `python -m server.passwd`, and paste the
 credentials into `server/.env`. The script prints the exact steps when it
 finishes.
 
@@ -51,7 +51,7 @@ alternative is below — the app is identical either way.
 and the index is one file you can delete as a repair step. See
 `brain/wiki/Grep Beats Embeddings Here.md`.
 
-**Why loopback-only binding?** An OAuth app with an allowlist, served over plain
+**Why loopback-only binding?** A password-protected app served over plain
 HTTP on a public IP, is decorated rather than protected. Funnel terminates TLS and
 forwards to `127.0.0.1`, so there is no unencrypted public surface at any point.
 
@@ -94,20 +94,23 @@ your-name.duckdns.org {
 ```
 
 DNS-01 means you never expose port 80 for the challenge. Set
-`AGENTOS_BASE_URL` and `OAUTH_REDIRECT_URI` to the DuckDNS hostname and restart.
+`AGENTOS_BASE_URL` to the DuckDNS hostname and restart.
 
 Free options that do **not** work here: Freenom is defunct; `nip.io` and
-`sslip.io` hit Let's Encrypt rate limits and are unreliable as OAuth redirect
+`sslip.io` hit Let's Encrypt rate limits and are unreliable as published
 targets.
 
 ## Troubleshooting
 
 | Symptom | Cause |
 |---|---|
-| `redirect_uri_mismatch` on sign-in | `OAUTH_REDIRECT_URI` must equal the Google console entry **exactly**, including scheme and no trailing slash |
-| 403 after a successful Google login | your address is not in `ALLOWED_EMAILS`. Working as designed |
+| Sign-in page says "no credentials set" | `AGENTOS_USER` / `AGENTOS_PASSWORD_HASH` are empty. Run `.venv/bin/python -m server.passwd`. An empty credential config denies everyone on purpose |
+| `429 Too many attempts` | the per-address lockout engaged. It clears itself after `LOGIN_LOCKOUT_SECONDS` (default 15 min), and a correct password does not bypass it |
+| Forgot the password | there is no reset by design. Re-run `python -m server.passwd`, replace the hash in `server/.env`, restart |
 | Signed out after every restart | `SESSION_SECRET` is empty in `server/.env` |
 | Status pill says `keyword`, not `hybrid` | `sqlite-vec` or `fastembed` missing: `.venv/bin/pip install -r server/requirements.txt`, then reindex |
 | Reindex killed | swap missing. Re-run `provision.sh`, or `--full` less often |
-| Ask returns `[no inference key configured]` | set `OPENROUTER_API_KEY` |
+| Ask says there is no inference key | set `OPENROUTER_API_KEY` in `server/.env`, or paste one into Settings in the UI |
+| Ask returns a 429 from the provider | free-tier models rate-limit routinely. Set `LLM_FALLBACK_MODELS` |
+| Search cannot find a note you can see on the map | run `python -m server.tools.eval_retrieval`, and add the query as a probe |
 | Vault never updates | check `systemctl list-timers`; a non-fast-forward history stops the pull on purpose |

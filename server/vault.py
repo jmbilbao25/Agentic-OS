@@ -130,6 +130,18 @@ def load_system() -> List[Doc]:
     return out
 
 
+def load_all() -> List[Doc]:
+    """Vault content *and* the OS's own files, which is what every caller wants.
+
+    This exists because the map and the index used to disagree. `/api/graph` drew
+    `load() + load_system()` while `/api/doc` and the indexer read only `load()`,
+    so the whole SKILLS ring and the kernel at the centre were visible, unopenable
+    (404 on click) and unsearchable. Anything that answers "what is in this brain"
+    should call this, not `load()`.
+    """
+    return load() + load_system()
+
+
 def load() -> List[Doc]:
     """Every content document in the vault, in a stable order."""
     docs = []

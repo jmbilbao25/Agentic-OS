@@ -32,14 +32,17 @@ Promote by rewriting, never by moving. Supporting: `STATE.md`, `lessons.md`,
 - Host: EC2 `t3.micro` + 30 GB gp3, ~$10/mo, inside the credit-based free tier.
 - Retrieval: SQLite FTS5 (BM25) + sqlite-vec, fused with RRF. Index is
   disposable; markdown is truth. See [[Grep Beats Embeddings Here]].
-- Embeddings: quantised MiniLM, CPU-only, on-box. Inference: remote,
-  OpenAI-compatible, currently OpenRouter free tier.
-- Auth: Google OAuth, single-account allowlist. TLS via Tailscale Funnel.
+- Embeddings: quantised BGE-small, CPU-only, on-box. Inference: remote,
+  OpenAI-compatible; provider, model and fallback chain are live-editable in the UI.
+- Auth: one username + one PBKDF2 password hash, per-address lockout. Mint with
+  `python -m server.passwd`. TLS via Tailscale Funnel.
 - Why a server at all: [[Local Runtime Closes The Gaps]].
 
 ## Blocked on the user
-- Create the Google OAuth client (console → credentials) and paste ID + secret
-  into `server/.env`. Nothing else can gate the UI until then.
+- Run `python -m server.passwd` and paste the three lines into `server/.env`.
+  An empty credential config denies everyone, including you.
+- Paste an OpenRouter key into Settings in the UI (or `server/.env`). Search works
+  without one; Ask and Gauntlet do not.
 - Run `deploy/launch-ec2.sh` from CloudShell, then `deploy/provision.sh` on the box.
 - Install `config/kernel-global.md` at the harness's global scope so repo-less
   sessions still boot.
@@ -49,6 +52,8 @@ Promote by rewriting, never by moving. Supporting: `STATE.md`, `lessons.md`,
   carries the boot instruction; hooks are an upgrade, not a requirement.
 - Hybrid retrieval for humans and RAG, grep for the agent. Markdown stays
   authoritative — the reconciliation is in [[Grep Beats Embeddings Here]].
+- Retrieval needs a name-match nudge: neither BM25 nor the vectors can see a title,
+  so typing a note's name was the weakest search. Measured top-1 7/16 → 12/16.
 
 ## Next action
 `bin/os loop next deploy-always-on`

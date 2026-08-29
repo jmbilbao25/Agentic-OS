@@ -34,6 +34,23 @@ Then finish the three things a script cannot do for you: `tailscale up` +
 credentials into `server/.env`. The script prints the exact steps when it
 finishes.
 
+### Optionally, the agent front end
+
+```bash
+# on the box, after provision.sh
+bash deploy/install-harness.sh
+```
+
+Adds the **JM Agentic-OS Harness**: Node 22, the prebuilt DSH runtime from npm, an
+MCP token, and a systemd unit. It binds `127.0.0.1:3080` and stays there, because
+the DSH web app has no authentication of its own — reach it with
+`ssh -N -L 3080:127.0.0.1:3080`. See `harness/README.md` for the threat model and
+`Caddyfile.harness` if you want it published with a password.
+
+One ordering note: `provision.sh` rewrites `/etc/caddy/Caddyfile` from
+`deploy/Caddyfile` alone, so if you published the harness, re-run
+`install-harness.sh` after any `provision.sh` to put its site block back.
+
 ## Why these choices
 
 **Why not run the model on the box?** A `t3.micro` has 1 GB of RAM. It holds an

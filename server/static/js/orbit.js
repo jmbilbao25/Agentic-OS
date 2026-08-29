@@ -22,6 +22,8 @@
  *    toward, so zoom, fly-to and reset are all the same one line.
  */
 
+import { LAYOUT_IDS, apply as layout, easeOutCubic } from './layouts.js';
+
 export const RINGS = [
   { id: 'skills',       label: 'SKILLS',       r: 0.26, width: 0.085, bands: 6, color: '#ff8a3d' },
   { id: 'memory',       label: 'MEMORY',       r: 0.50, width: 0.130, bands: 9, color: '#b06cff' },
@@ -29,13 +31,24 @@ export const RINGS = [
   { id: 'applications', label: 'APPLICATIONS', r: 0.94, width: 0.075, bands: 5, color: '#3ec5ff' },
 ];
 
+/* Zone ordering, used by the lane and lattice layouts. The kernel sorts ahead of
+   every zone rather than falling into a default bucket at the end — it is the
+   origin of the vault, not an afterthought. */
+export const RING_INDEX = Object.fromEntries(
+  [['core', -1], ...RINGS.map((r, i) => [r.id, i])]);
+
 const TAU = Math.PI * 2;
+const MORPH = 0.78;                     // seconds for a layout change to settle
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 /* Frame-rate independent easing. A fixed per-frame fraction moves twice as fast
    on a 120Hz display, which is how camera motion ends up feeling different on
    different machines. */
 const ease = (cur, target, rate, dt) =>
   cur + (target - cur) * (1 - Math.exp(-rate * dt));
+
+/** Axis-aligned rectangle overlap. */
+const hits = (a, b) => !(a.x + a.w < b.x || b.x + b.w < a.x ||
+                         a.y + a.h < b.y || b.y + b.h < a.y);
 
 const LABEL_BUDGET = { sparse: { near: 6, far: 18 },
                        balanced: { near: 12, far: 40 },
@@ -46,10 +59,35 @@ export class Orbit {
     this.cv = canvas;
     this.ctx = canvas.getContext('2d', { alpha: false });
     this.nodes = [];
+    this.all = [];
     this.edges = [];
     this.center = null;
     this.index = {};
     this.adj = new Map();
+
+    /* Which arrangement the nodes are in, and how far through the transition to
+       it we are. `morph` at 1 means settled; anything less lerps each node from
+       the `ax`/`ay` anchor captured when the layout changed. Making a layout
+       switch an animation rather than a jump-cut is the whole reason the map
+       stays legible across views — you can follow a specific dot from the ring
+       it lived in to its place in the line. */
+    this.layout = 'rings';
+    this.morph = 1;
+    this.ranking = [];
+    this.ringAlpha = 1;       // concentric bands fade out in the flat layouts
+    this.metrics = { gapY: 0.2, stepX: 0.2 };
+
+    /* Pixels along each edge that something else is sitting on top of.
+       The canvas is the whole window, but the rail and the topbar float over it,
+       and a horizontal line centred in the *window* runs underneath the rail. Set
+       from the DOM by whoever owns the chrome — see setInsets. */
+    this.insets = { left: 0, right: 0, top: 0, bottom: 0 };
+
+    /* Rectangles a label may not be drawn into, in CSS pixels. Insets keep the
+       *arrangement* clear of the chrome, but they are per-edge and the chrome is
+       not: the rail covers the lower left, so a full-height left inset would
+       also forbid the empty top-left corner. Labels get the exact shapes. */
+    this.obstacles = [];
 
     this.hidden = new Set();
     this.since = 0;
@@ -96,23 +134,17 @@ export class Orbit {
 
     this.nodes = [];
     for (const ring of RINGS) {
-      const group = (byRing[ring.id] || []).sort(
-        (a, b) => a.layer.localeCompare(b.layer) || a.title.localeCompare(b.title));
-      const N = group.length;
-      group.forEach((n, i) => {
-        // Golden-angle offset per ring keeps sparse rings from lining up into an
-        // accidental radial spoke.
-        const a = N ? (i / N) * TAU + ring.r * 2.399 : 0;
+      const group = byRing[ring.id] || [];
+      ring.count = group.length;
+      for (const n of group) {
         this.nodes.push(Object.assign(n, {
-          ring: ring.id, color: ring.color, a0: a, rr: ring.r,
-          // Deterministic radial jitter so equal-count rings don't look like a
-          // grid, but a node never moves between reloads.
-          jitter: ((i * 2654435761) % 1000) / 1000 * 0.028 - 0.014,
-          _r: 0, _x: 0, _y: 0, _on: true,
+          ring: ring.id, color: ring.color,
+          _r: 0, _x: 0, _y: 0, _on: true, slot: 0, rankIdx: -1,
         }));
-      });
-      ring.count = N;
+      }
     }
+    if (this.center) Object.assign(this.center, { color: RINGS[0].color, slot: 0 });
+    this.all = this.center ? this.nodes.concat(this.center) : this.nodes.slice();
 
     const ids = new Set(this.nodes.map((n) => n.id));
     if (this.center) ids.add(this.center.id);
@@ -132,7 +164,110 @@ export class Orbit {
     const times = nodes.map((n) => n.mtime || 0).filter(Boolean);
     this.oldest = times.length ? Math.min(...times) : 0;
     this.newest = times.length ? Math.max(...times) : 0;
+
+    // A reload keeps whichever layout you were in, but arrives already settled:
+    // animating from a position the previous data set had is meaningless.
+    this._layout();
+    this._anchor();
+    this.morph = 1;
     return RINGS;
+  }
+
+  /* ---------------------------------------------------------------- layouts */
+
+  /** Switch arrangement. Returns the layout actually in effect.
+   *
+   * `animate: false` is for restoring a remembered layout on load — a transition
+   * needs a before, and on a cold start there isn't one. */
+  setLayout(name, { animate = true } = {}) {
+    if (!LAYOUT_IDS.includes(name) || name === this.layout) return this.layout;
+    this.layout = name;
+    if (animate) {
+      this.relayout();
+    } else {
+      this._layout();
+      this._anchor();
+      this.morph = 1;
+      this.ringAlpha = name === 'rings' ? 1 : 0;
+    }
+    return this.layout;
+  }
+
+  /** Recompute targets and glide there from wherever each node is right now. */
+  relayout() {
+    this._anchor();
+    this._layout();
+    this.morph = 0;
+  }
+
+  /* Freeze the current *rendered* position as the start of the next transition.
+     Mid-morph this is the interpolated point, not the previous layout's target —
+     re-ranking a line while it is still assembling has to continue from what is
+     on screen or the dots visibly snap backwards before moving forwards. */
+  _anchor() {
+    const m = this.morph >= 1 ? 1 : easeOutCubic(this.morph);
+    for (const n of this.all) {
+      const [x, y] = this._target(n);
+      const had = n.ax !== undefined;
+      n.ax = had && m < 1 ? n.ax + (x - n.ax) * m : x;
+      n.ay = had && m < 1 ? n.ay + (y - n.ay) * m : y;
+    }
+  }
+
+  /** Region the flat layouts may use, in normalised units at zoom 1. */
+  _frame() {
+    const u = this.unit || 1;
+    const i = this.insets;
+    return {
+      x0: (i.left - this.cx) / u,
+      x1: (this.w - i.right - this.cx) / u,
+      y0: (i.top - this.cy) / u,
+      y1: (this.h - i.bottom - this.cy) / u,
+    };
+  }
+
+  /** Tell the map what is covering it. Pixels, per edge. */
+  setInsets(insets = {}) {
+    const next = { ...this.insets, ...insets };
+    const same = Object.keys(next).every((k) => next[k] === this.insets[k]);
+    this.insets = next;
+    // Opening a note does not move the rail, and re-running the layout on every
+    // panel toggle is work with nothing to show for it.
+    if (!same) this._layout();
+    return this;
+  }
+
+  /** Regions labels must avoid, in canvas-relative CSS pixels. */
+  setObstacles(rects = []) {
+    this.obstacles = rects.filter((r) => r && r.w > 0 && r.h > 0);
+    return this;
+  }
+
+  _layout() {
+    if (!this.all.length) return;
+    if (this.layout === 'rings') {
+      this.metrics = layout('rings', this.nodes, { RINGS })
+        || { gapY: 0.2, stepX: 0.2 };
+      // The kernel is the hub of the ring view, so it stays pinned; in the flat
+      // layouts it is just another document and joins the arrangement.
+      if (this.center) Object.assign(this.center, { polar: false, px: 0, py: 0 });
+    } else {
+      this.metrics = layout(this.layout, this.all, {
+        RINGS, RING_INDEX, order: this.ranking, frame: this._frame(),
+        passes: (n) => this._passes(n),
+      });
+    }
+  }
+
+  /** A node's target position in normalised units: origin at the scene centre,
+   *  one unit is `this.unit` pixels. Polar layouts get the ambient drift here,
+   *  which is what keeps the spin out of the layout functions. */
+  _target(n) {
+    if (n.polar) {
+      const a = n.pa + this.spin * (1 - n.pr * 0.55);   // inner rings drift faster
+      return [Math.cos(a) * n.pr, Math.sin(a) * n.pr];
+    }
+    return [n.px || 0, n.py || 0];
   }
 
   /* ---------------------------------------------------------------- state */
@@ -162,10 +297,20 @@ export class Orbit {
   ringVisible(id) { return !this.hidden.has(id); }
 
   /** Hide anything older than `ts` (epoch seconds). 0 shows everything. */
-  setSince(ts) { this.since = ts || 0; }
+  setSince(ts) {
+    const next = ts || 0;
+    if (next === this.since) return;
+    this.since = next;
+    // Rank promotes whatever survives the filters, so a filter change is a
+    // reordering there and only a change of opacity everywhere else.
+    if (this.layout === 'rank') this.relayout();
+  }
 
   /** An extra predicate, for tag and layer filters from the palette. */
-  setPredicate(fn) { this.pred = typeof fn === 'function' ? fn : null; }
+  setPredicate(fn) {
+    this.pred = typeof fn === 'function' ? fn : null;
+    if (this.layout === 'rank') this.relayout();
+  }
 
   /** Count of nodes currently passing every filter. */
   visibleCount() {
@@ -180,14 +325,24 @@ export class Orbit {
     return true;
   }
 
-  /** Light up search results and pull the eye to them. */
+  /** Light up search results and pull the eye to them.
+   *
+   * `ids` is ordered best-first, and that order is the input to the Rank layout —
+   * so in Rank, typing re-sorts the line live instead of only recolouring it. */
   highlight(ids) {
     this.query = new Set(ids);
+    this.ranking = [...ids];
     this.pulse.clear();
     ids.forEach((id, i) => this.pulse.set(id, clamp(1 - i * 0.05, 0.25, 1)));
+    if (this.layout === 'rank') this.relayout();
   }
 
-  clearHighlight() { this.query = new Set(); this.pulse.clear(); }
+  clearHighlight() {
+    this.query = new Set();
+    this.ranking = [];
+    this.pulse.clear();
+    if (this.layout === 'rank') this.relayout();
+  }
 
   /* --------------------------------------------------------------- camera */
 
@@ -205,11 +360,12 @@ export class Orbit {
     if (!fly) return;
     this.freeze(true);
     // Where the node sits relative to the scene centre, at the target zoom.
-    const a = n === this.center ? 0 : n.a0 + this.spin * (1 - n.rr * 0.55);
-    const rad = n === this.center ? 0 : (n.rr + n.jitter) * this.unit * zoom;
+    // Read from the rendered position rather than the layout target so a fly-to
+    // issued mid-transition lands on the dot instead of ahead of it.
+    const nx = n._nx ?? 0, ny = n._ny ?? 0;
     this.cam.k = zoom;
-    this.cam.x = -Math.cos(a) * rad;
-    this.cam.y = -Math.sin(a) * rad;
+    this.cam.x = -nx * this.unit * zoom;
+    this.cam.y = -ny * this.unit * zoom;
   }
 
   deselect() {
@@ -259,35 +415,40 @@ export class Orbit {
     // 0.40 rather than half the short side: the outermost zone label sits above
     // its band, and at 0.435 that label clipped off the top on short viewports.
     this.unit = Math.min(w, h) * 0.40;
+    // The flat layouts pack to the viewport's aspect, so a resize changes their
+    // shape. Recompute without a morph — a window drag is not a view change.
+    this._layout();
     return this;
   }
 
   _place() {
     const { view } = this;
     const neighbours = this.hover ? this.adj.get(this.hover) : null;
+    const m = this.morph >= 1 ? 1 : easeOutCubic(this.morph);
+    const s = this.unit * view.k;
+    const ox = this.cx + view.x, oy = this.cy + view.y;
 
-    for (const n of this.nodes) {
-      const a = n.a0 + this.spin * (1 - n.rr * 0.55);   // inner rings drift faster
-      const r = (n.rr + n.jitter) * this.unit * view.k;
-      n._x = this.cx + view.x + Math.cos(a) * r;
-      n._y = this.cy + view.y + Math.sin(a) * r;
-      n._a = a;
+    for (const n of this.all) {
+      let [nx, ny] = this._target(n);
+      if (m < 1) {
+        nx = n.ax + (nx - n.ax) * m;
+        ny = n.ay + (ny - n.ay) * m;
+      }
+      n._nx = nx; n._ny = ny;
+      n._x = ox + nx * s;
+      n._y = oy + ny * s;
+      // Direction from the centre, which is what decides the label side. Derived
+      // from position rather than stored, so it is meaningful in every layout.
+      n._a = Math.atan2(ny, nx);
       n._r = this._radius(n);
       n._on = this._passes(n);
       n._near = !this.hover || this.hover === n.id ||
         (neighbours ? neighbours.has(n.id) : false);
     }
-    if (this.center) {
-      this.center._x = this.cx + view.x;
-      this.center._y = this.cy + view.y;
-      this.center._r = 9 * view.k;
-      this.center._on = this._passes(this.center);
-      this.center._near = !this.hover || this.hover === this.center.id ||
-        (neighbours ? neighbours.has(this.center.id) : false);
-    }
   }
 
   _radius(n) {
+    if (n === this.center) return 9 * this.view.k;
     const words = n.words || 0;
     const base = 2.7 + Math.min(Math.sqrt(words) / 9, 4.4);
     const sel = this.selected === n.id ? 2.4 : 0;
@@ -314,6 +475,14 @@ export class Orbit {
       if (!this.reducedMotion) {
         this.spin += dt * 0.028 * this.spinRate * this.spinScale;
       }
+
+      if (this.morph < 1) {
+        // Reduced motion means arrive, not crawl: the transition is decorative,
+        // the destination is the information.
+        this.morph = this.reducedMotion ? 1 : Math.min(1, this.morph + dt / MORPH);
+      }
+      this.ringAlpha = ease(this.ringAlpha, this.layout === 'rings' ? 1 : 0,
+                            this.reducedMotion ? 40 : 4.6, dt);
 
       const moved = Math.abs(this.cam.x - this.view.x) > 0.05 ||
                     Math.abs(this.cam.y - this.view.y) > 0.05 ||
@@ -371,6 +540,10 @@ export class Orbit {
      and each circle drifts at a slightly different rate so the band shimmers
      instead of rotating as a rigid disc. */
   _ring(g, ring) {
+    // Concentric geometry is a claim about where things are. In a grid or a line
+    // that claim is false, so the bands go with the layout rather than sitting
+    // behind it as decoration.
+    if (this.ringAlpha < 0.02) return;
     const on = !this.hidden.has(ring.id);
     const k = this.view.k;
     const cx = this.cx + this.view.x, cy = this.cy + this.view.y;
@@ -393,7 +566,7 @@ export class Orbit {
       // Brightest in the middle of the band, feathering to the edges.
       const centreness = 1 - Math.abs(f - 0.5) * 2;
       const base = (on ? 0.5 : 0.09) * (0.3 + 0.7 * centreness) *
-        (this.hover ? 0.5 : 1);
+        (this.hover ? 0.5 : 1) * this.ringAlpha;
 
       const count = Math.max(56, Math.min(Math.round(rr * 1.15), 900));
       const drift = this.spin * (1 - ring.r * 0.5) * (0.6 + 0.4 * f) + b * 0.21;
@@ -411,7 +584,7 @@ export class Orbit {
     }
 
     // Faint inner boundary so zones stay distinguishable when dimmed.
-    g.globalAlpha = on ? 0.1 : 0.03;
+    g.globalAlpha = (on ? 0.1 : 0.03) * this.ringAlpha;
     g.strokeStyle = ring.color;
     g.lineWidth = 1;
     g.beginPath(); g.arc(cx, cy, inner, 0, TAU); g.stroke();
@@ -421,6 +594,7 @@ export class Orbit {
   _edges(g) {
     g.lineWidth = 1;
     const cx = this.cx + this.view.x, cy = this.cy + this.view.y;
+    const flat = this.layout !== 'rings';
     for (const e of this.edges) {
       const a = this.index[e.source], b = this.index[e.target];
       if (!a || !b || !a._on || !b._on) continue;
@@ -432,12 +606,27 @@ export class Orbit {
       g.globalAlpha = touches ? 0.66 : 0.1;
       g.strokeStyle = touches ? '#cbb6ff' : '#6b5a8f';
       g.lineWidth = touches ? 1.4 : 1;
-      // Quadratic toward the centre: straight chords across the middle would
-      // read as a scribble; inward curves imply the hub.
+
       const mx = (a._x + b._x) / 2, my = (a._y + b._y) / 2;
+      let qx, qy;
+      if (flat) {
+        // Pulling toward the scene centre only means something when the scene has
+        // one. In a line the centre is just a point on the line, so every edge
+        // bowed straight through the nodes and the row sat in a haze of its own
+        // links. Bowing perpendicular instead gives an arc diagram: the standard
+        // way to draw a graph over an ordered axis, and legible at a glance.
+        const len = Math.hypot(b._x - a._x, b._y - a._y) || 1;
+        qx = mx;
+        qy = my - Math.min(len * 0.42, this.h * 0.30);
+      } else {
+        // Quadratic toward the centre: straight chords across the middle would
+        // read as a scribble; inward curves imply the hub.
+        qx = mx + (cx - mx) * 0.34;
+        qy = my + (cy - my) * 0.34;
+      }
       g.beginPath();
       g.moveTo(a._x, a._y);
-      g.quadraticCurveTo(mx + (cx - mx) * 0.34, my + (cy - my) * 0.34, b._x, b._y);
+      g.quadraticCurveTo(qx, qy, b._x, b._y);
       g.stroke();
     }
     g.globalAlpha = 1;
@@ -445,6 +634,11 @@ export class Orbit {
   }
 
   _nodes(g) {
+    // In Rank, everything the query did not match is parked at the tail of the
+    // line. Leaving it at full brightness makes the tail compete with the answer,
+    // so it recedes — still there, still clickable, no longer shouting.
+    const ranked = this.layout === 'rank' && this.ranking.length > 0;
+
     for (const n of this.nodes) {
       const pulse = this.pulse.get(n.id) || 0;
       const isHit = this.query.has(n.id);
@@ -455,6 +649,7 @@ export class Orbit {
       let alpha = 1;
       if (!n._on) alpha = 0.1;
       else if (!n._near) alpha = 0.22;
+      else if (ranked && n.rankIdx < 0) alpha = 0.3;
 
       // The soft halo is reserved for the hovered or selected node. It used to
       // fire on every pulsing search hit too, which covered the map in two dozen
@@ -534,32 +729,69 @@ export class Orbit {
     const budgets = LABEL_BUDGET[this.labelDensity] || LABEL_BUDGET.balanced;
     const budget = zoomed ? budgets.far : budgets.near;
 
+    /* Two placement strategies, because the geometry differs in kind.
+     *
+     * Radially, "outside the ring" is a direction every node agrees on and
+     * neighbours diverge as they go, so a side label works. In a line or a
+     * lattice, side labels run straight into the next node along — the horizontal
+     * axis is fully occupied by the arrangement itself. So flat layouts stack
+     * their labels above the dot, stepping the height by slot so consecutive
+     * nodes never share a baseline.
+     *
+     * How many baselines to cycle through is not a taste call: the stack must fit
+     * inside the vertical space the layout left between rows, or the names from
+     * one row are drawn over the dots of the row above. So the layout reports its
+     * row gap and the label stack is sized from it. */
+    const flat = this.layout !== 'rings';
+    const step = size + 3;
+    const gapPx = (this.metrics?.gapY || 0.4) * this.unit * k;
+    const lanes = clamp(Math.floor(gapPx / step), 2, 7);
+
     for (const n of cand) {
       const active = rank(n) >= 3;
-      if (placed.length >= budget && !active) break;
+      // In Rank the order *is* the content, so a matched node is worth a label
+      // even past the density budget. It still has to clear its neighbours: the
+      // first version let ranked labels ignore collisions too, and twelve results
+      // came out as one illegible smear. A dropped name recovers on hover; an
+      // unreadable one recovers never.
+      const must = active ||
+        (this.layout === 'rank' && n.rankIdx >= 0 && this.ranking.length > 0);
+      if (placed.length >= budget && !must) break;
 
-      const right = Math.cos(n._a) >= 0;
       const t = n.title.length > 30 ? `${n.title.slice(0, 29)}…` : n.title;
       const w = g.measureText(t).width;
-      const pad = n._r + 7 * k;
-      const x = n._x + (right ? pad : -pad);
-      const box = { x: right ? x : x - w, y: n._y - h / 2, w, h };
+
+      let x, y, align, box;
+      if (flat) {
+        x = n._x;
+        y = n._y - (n._r + 8 * k) - ((n.slot || 0) % lanes) * step;
+        align = 'center';
+        box = { x: x - w / 2, y: y - h / 2, w, h };
+      } else {
+        const right = Math.cos(n._a) >= 0;
+        const pad = n._r + 7 * k;
+        x = n._x + (right ? pad : -pad);
+        y = n._y;
+        align = right ? 'left' : 'right';
+        box = { x: right ? x : x - w, y: y - h / 2, w, h };
+      }
 
       if (box.x < 4 || box.x + box.w > this.w - 4) continue;
-      if (box.y < 50 || box.y + box.h > this.h - 6) continue;
+      if (box.y < 4 || box.y + box.h > this.h - 6) continue;
+      // Behind the rail or the topbar is not a placement, it is a disappearance.
+      if (this.obstacles.some((r) => hits(box, r))) continue;
 
-      const clash = placed.some((p) => !(box.x + box.w < p.x || p.x + p.w < box.x ||
-                                         box.y + box.h < p.y || p.y + p.h < box.y));
+      const clash = placed.some((p) => hits(box, p));
       if (clash && !active) continue;
       placed.push(box);
 
-      g.textAlign = right ? 'left' : 'right';
+      g.textAlign = align;
       g.globalAlpha = active ? 1 : (n._near ? 0.66 : 0.3);
       g.fillStyle = active ? '#ffffff' : '#a8b6c9';
       g.save();
       g.shadowColor = 'rgba(4,6,11,.98)';
       g.shadowBlur = active ? 8 : 5;
-      g.fillText(t, x, n._y);
+      g.fillText(t, x, y);
       g.restore();
     }
     g.globalAlpha = 1;
@@ -607,6 +839,7 @@ export class Orbit {
   /* Zone labels sit just outside each band's outer edge, on the vertical axis.
      Placing them on the node radius put them on top of the nodes. */
   _ringLabels(g) {
+    if (this.ringAlpha < 0.02) return;
     const cx = this.cx + this.view.x, cy = this.cy + this.view.y;
     g.textAlign = 'center'; g.textBaseline = 'middle';
     g.font = "600 9.5px 'Space Grotesk', ui-sans-serif, sans-serif";
@@ -615,7 +848,8 @@ export class Orbit {
       if (outer < 34) continue;
       const y = cy - outer - 9 * this.view.k;
       if (y < 52 || y > this.h - 8) continue;      // clear of the topbar
-      g.globalAlpha = this.hidden.has(ring.id) ? 0.2 : (this.hover ? 0.4 : 0.8);
+      g.globalAlpha = (this.hidden.has(ring.id) ? 0.2 : (this.hover ? 0.4 : 0.8))
+        * this.ringAlpha;
       g.fillStyle = ring.color;
       g.save();
       g.shadowColor = 'rgba(4,6,11,.98)'; g.shadowBlur = 9;
@@ -629,8 +863,7 @@ export class Orbit {
 
   at(px, py) {
     let best = null, bd = Infinity;
-    const all = this.center ? this.nodes.concat([this.center]) : this.nodes;
-    for (const n of all) {
+    for (const n of this.all) {
       if (!n._on) continue;
       const dx = n._x - px, dy = n._y - py;
       const d = dx * dx + dy * dy;

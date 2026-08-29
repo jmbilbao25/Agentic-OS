@@ -13,11 +13,16 @@
  * am I looking at" is answerable at a glance. `bands` is how many circles;
  * `width` is how much radius the zone occupies; `r` is where its nodes sit. */
 export const RINGS = [
-  { id: 'skills',       label: 'SKILLS',       r: 0.26, width: 0.085, bands: 6,  color: '#ff8a3d' },
-  { id: 'memory',       label: 'MEMORY',       r: 0.50, width: 0.130, bands: 9,  color: '#b06cff' },
-  { id: 'routines',     label: 'ROUTINES',     r: 0.74, width: 0.105, bands: 7,  color: '#ffb03d' },
-  { id: 'applications', label: 'APPLICATIONS', r: 0.94, width: 0.075, bands: 5,  color: '#3ec5ff' },
+  { id: 'skills',       label: 'SKILLS',       r: 0.33, width: 0.090, bands: 6, color: '#ff8a3d' },
+  { id: 'memory',       label: 'MEMORY',       r: 0.60, width: 0.140, bands: 9, color: '#b06cff' },
+  { id: 'routines',     label: 'ROUTINES',     r: 0.81, width: 0.090, bands: 6, color: '#ffb03d' },
+  { id: 'applications', label: 'APPLICATIONS', r: 0.95, width: 0.070, bands: 5, color: '#3ec5ff' },
 ];
+
+/* How many nodes a ring can hold on one orbit before it needs sub-orbits.
+   Circumference grows with radius, so the inner rings crowd first — and the
+   inner rings are exactly where the skills live. */
+const SPACING = 0.20;   // radians of arc per node, minimum
 const RING_BY_ID = Object.fromEntries(RINGS.map(r => [r.id, r]));
 
 const TAU = Math.PI * 2;
@@ -35,11 +40,23 @@ export class Orbit {
     this.selected = null;
     this.pulse = new Map();        // id -> 0..1 highlight from search
     this.view = { x: 0, y: 0, k: 1 };
+    this.target = { x: 0, y: 0, k: 1 };   // camera eases toward this
+    this.focusId = null;
+    this.focusSet = null;          // Set of ids in the focused neighbourhood
+    this.signals = [];             // travelling dots along edges
     this.dpr = Math.min(window.devicePixelRatio || 1, 2);
     this._raf = null;
     this._t0 = performance.now();
     this.onHover = () => {};
     this.onSelect = () => {};
+
+    // Honour the OS-level setting rather than inventing a toggle nobody finds.
+    // With reduced motion the map is fully static: no orbit drift, no signal
+    // pulses, and camera moves are instant rather than eased.
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    this.reduced = mq.matches;
+    mq.addEventListener?.('change', (e) => { this.reduced = e.matches; });
+
     this._bind();
     this.resize();
   }
@@ -60,18 +77,34 @@ export class Orbit {
       const group = (byRing[ring.id] || []).sort(
         (a, b) => a.layer.localeCompare(b.layer) || a.title.localeCompare(b.title));
       const N = group.length;
+
+      // Split a crowded ring into concentric sub-orbits inside its own band
+      // rather than jamming everything onto one circle. With 13 skills on the
+      // innermost ring, a single orbit put nodes ~0.5rad apart and every label
+      // collided; two sub-orbits halve the angular density for free.
+      const capacity = Math.max(4, Math.floor(TAU / SPACING * ring.r));
+      const orbits = Math.max(1, Math.min(3, Math.ceil(N / capacity)));
+
       group.forEach((n, i) => {
-        // Golden-angle offset per ring keeps sparse rings from lining up into
-        // an accidental radial spoke.
-        const a = N ? (i / N) * TAU + ring.r * 2.399 : 0;
+        const lane = i % orbits;
+        const inLane = Math.ceil((N - lane) / orbits);
+        const idxInLane = Math.floor(i / orbits);
+        // Lanes sit at the inner edge, middle, and outer edge of the band.
+        const spread = orbits === 1 ? 0
+          : (lane / (orbits - 1) - 0.5) * ring.width * 0.72;
+        // Golden-angle offset per ring and per lane, so lanes interleave
+        // instead of stacking into radial spokes.
+        const a = inLane
+          ? (idxInLane / inLane) * TAU + ring.r * 2.399 + lane * 0.618
+          : 0;
         this.nodes.push(Object.assign(n, {
-          ring: ring.id, color: ring.color, a0: a, rr: ring.r,
-          // slight radial jitter so equal-count rings don't look like a grid
-          jitter: ((i * 2654435761) % 1000) / 1000 * 0.028 - 0.014,
+          ring: ring.id, color: ring.color, a0: a, rr: ring.r + spread,
+          jitter: ((i * 2654435761) % 1000) / 1000 * 0.012 - 0.006,
           _r: 0, _x: 0, _y: 0,
         }));
       });
       ring.count = N;
+      ring.orbits = orbits;
     }
 
     const ids = new Set(this.nodes.map(n => n.id));
@@ -151,7 +184,9 @@ export class Orbit {
     const loop = (t) => {
       const dt = Math.min((t - this._t0) / 1000, 0.05);
       this._t0 = t;
-      this.spin += dt * 0.028;                 // slow, ambient
+      if (!this.reduced) this.spin += dt * 0.028;     // slow, ambient
+      this._ease(dt);
+      this._advance(dt);
       for (const [k, v] of this.pulse) {
         const nv = v - dt * 0.22;
         nv <= 0 ? this.pulse.delete(k) : this.pulse.set(k, nv);
@@ -160,6 +195,22 @@ export class Orbit {
       this._raf = requestAnimationFrame(loop);
     };
     this._raf = requestAnimationFrame(loop);
+  }
+
+  /* Exponential ease toward the camera target — frame-rate independent, so it
+     behaves the same at 60Hz and 144Hz. */
+  _ease(dt) {
+    if (this.reduced) { Object.assign(this.view, this.target); return; }
+    const f = 1 - Math.exp(-dt * 7.5);
+    this.view.x += (this.target.x - this.view.x) * f;
+    this.view.y += (this.target.y - this.view.y) * f;
+    this.view.k += (this.target.k - this.view.k) * f;
+  }
+
+  _advance(dt) {
+    if (!this.signals.length) return;
+    for (const s of this.signals) s.t += dt * s.speed;
+    this.signals = this.signals.filter((s) => s.t < 1);
   }
 
   stop() { if (this._raf) cancelAnimationFrame(this._raf); }
@@ -236,23 +287,57 @@ export class Orbit {
     g.globalAlpha = 1;
   }
 
+  /* Control point for an edge, curved toward the hub. Straight chords across the
+     middle read as a scribble; inward curves imply the centre. Shared with the
+     signal renderer so a pulse follows exactly the line it is drawn on. */
+  _ctrl(a, b) {
+    const mx = (a._x + b._x) / 2, my = (a._y + b._y) / 2;
+    const cx = this.cx + this.view.x, cy = this.cy + this.view.y;
+    return [mx + (cx - mx) * 0.34, my + (cy - my) * 0.34];
+  }
+
   _edges(g) {
     g.lineWidth = 1;
     for (const e of this.edges) {
       const a = this.index[e.source], b = this.index[e.target];
       if (!a || !b || !a._on || !b._on) continue;
-      const lit = this.hover === a.id || this.hover === b.id ||
-                  this.selected === a.id || this.selected === b.id;
-      g.globalAlpha = lit ? 0.62 : 0.1;
-      g.strokeStyle = lit ? '#cbb6ff' : '#6b5a8f';
-      // Quadratic toward the centre: straight chords across the middle would
-      // read as a scribble; inward curves imply the hub.
-      const mx = (a._x + b._x) / 2, my = (a._y + b._y) / 2;
-      const cx = this.cx + this.view.x, cy = this.cy + this.view.y;
+      const inFocus = this._lit(a.id) && this._lit(b.id);
+      const touched = this.hover === a.id || this.hover === b.id ||
+                      this.focusId === a.id || this.focusId === b.id;
+      if (!inFocus) { g.globalAlpha = 0.03; g.strokeStyle = '#4a4060'; }
+      else if (touched) { g.globalAlpha = 0.7; g.strokeStyle = '#cbb6ff'; g.lineWidth = 1.4; }
+      else { g.globalAlpha = this.focusSet ? 0.3 : 0.1; g.strokeStyle = '#6b5a8f'; g.lineWidth = 1; }
+      const [qx, qy] = this._ctrl(a, b);
       g.beginPath();
       g.moveTo(a._x, a._y);
-      g.quadraticCurveTo(mx + (cx - mx) * 0.34, my + (cy - my) * 0.34, b._x, b._y);
+      g.quadraticCurveTo(qx, qy, b._x, b._y);
       g.stroke();
+    }
+    g.globalAlpha = 1;
+    g.lineWidth = 1;
+    this._signals(g);
+  }
+
+  /* Dots travelling along links. This is the one piece of non-ambient motion:
+     it fires on an explicit action and answers "what is this connected to?"
+     by showing the traversal instead of asking you to trace lines. */
+  _signals(g) {
+    for (const s of this.signals) {
+      const a = this.index[s.from], b = this.index[s.to];
+      if (!a || !b || !a._on || !b._on) continue;
+      const [qx, qy] = this._ctrl(a, b);
+      const t = s.t, u = 1 - t;
+      const x = u * u * a._x + 2 * u * t * qx + t * t * b._x;
+      const y = u * u * a._y + 2 * u * t * qy + t * t * b._y;
+      const fade = Math.sin(Math.PI * t);          // in and out, no pop
+      g.globalAlpha = 0.9 * fade;
+      g.fillStyle = '#e6d8ff';
+      g.shadowColor = '#b06cff';
+      g.shadowBlur = 12 * this.view.k;
+      g.beginPath();
+      g.arc(x, y, 2.1 * this.view.k, 0, TAU);
+      g.fill();
+      g.shadowBlur = 0;
     }
     g.globalAlpha = 1;
   }
@@ -261,8 +346,9 @@ export class Orbit {
     for (const n of this.nodes) {
       const pulse = this.pulse.get(n.id) || 0;
       const active = this.hover === n.id || this.selected === n.id || pulse > 0;
-      const dim = !n._on;
-      const alpha = dim ? 0.2 : 1;
+      const outside = !this._lit(n.id);
+      const dim = !n._on || outside;
+      const alpha = !n._on ? 0.2 : outside ? 0.16 : 1;
 
       if (active && !dim) {
         g.globalAlpha = 0.26 + pulse * 0.4;
@@ -312,6 +398,9 @@ export class Orbit {
       if (!n._on) return false;
       if (this.hover === n.id || this.selected === n.id) return true;
       if (this.pulse.has(n.id)) return true;
+      // In focus mode label the whole neighbourhood: that is precisely the set
+      // the user asked to see, and there are few enough of them to fit.
+      if (this.focusSet) return this.focusSet.has(n.id);
       return zoomed || (n.words || 0) > 400;
     }).sort((a, b) => {
       const rank = (n) => (this.hover === n.id ? 3 : this.selected === n.id ? 2
@@ -333,12 +422,27 @@ export class Orbit {
       const x = n._x + (right ? pad : -pad);
       const box = { x: right ? x : x - w, y: n._y - h / 2, w, h };
 
-      if (box.x < 4 || box.x + box.w > this.w - 4) continue;
-      if (box.y < 50 || box.y + box.h > this.h - 6) continue;
+      // Keep clear of the topbar, the viewport edges, and the legend block in
+      // the lower-left — a label sitting under the legend is unreadable.
+      if (box.x < 6 || box.x + box.w > this.w - 6) continue;
+      if (box.y < 54 || box.y + box.h > this.h - 8) continue;
+      const overLegend = box.x < 210 && box.y + box.h > this.h - 150;
+      if (overLegend && !active) continue;
 
-      const clash = placed.some((p) => !(box.x + box.w < p.x || p.x + p.w < box.x ||
-                                         box.y + box.h < p.y || p.y + p.h < box.y));
+      // Reject against other labels AND against every visible node, with a small
+      // gap. Text drawn across a glowing dot is worse than no text.
+      const gap = 3;
+      const clash = placed.some((p) =>
+        !(box.x + box.w + gap < p.x || p.x + p.w + gap < box.x ||
+          box.y + box.h + gap < p.y || p.y + p.h + gap < box.y));
       if (clash && !active) continue;
+
+      const onNode = this.nodes.some((m) =>
+        m !== n && m._on &&
+        m._x > box.x - 3 && m._x < box.x + box.w + 3 &&
+        m._y > box.y - 2 && m._y < box.y + box.h + 2);
+      if (onNode && !active) continue;
+
       placed.push(box);
 
       g.textAlign = right ? 'left' : 'right';
@@ -420,11 +524,65 @@ export class Orbit {
     return best;
   }
 
-  focus(id) {
+  /* Neighbourhood of a node: itself plus everything one wikilink away. */
+  neighbourhood(id) {
+    const set = new Set([id]);
+    for (const e of this.edges) {
+      if (e.source === id) set.add(e.target);
+      if (e.target === id) set.add(e.source);
+    }
+    return set;
+  }
+
+  /* Focus a node: dim everything outside its 1-hop neighbourhood, ease the
+     camera onto it, and fire a signal down each of its links. The dimming is
+     what makes a dense graph legible — without it, highlighting one node in a
+     hairball communicates nothing. */
+  focus(id, { move = true } = {}) {
     const n = this.index[id];
     if (!n) return;
     this.selected = id;
+    this.focusId = id;
+    this.focusSet = this.neighbourhood(id);
     this.pulse.set(id, 1);
+
+    if (!this.reduced) {
+      for (const e of this.edges) {
+        const other = e.source === id ? e.target : e.target === id ? e.source : null;
+        if (!other) continue;
+        this.signals.push({ from: id, to: other, t: 0, speed: 1.5 + Math.random() * 0.6 });
+      }
+    }
+
+    if (move && n !== this.center) {
+      const k = Math.max(this.target.k, 1.55);
+      const a = n.a0 + this.spin * (1 - n.rr * 0.55);
+      const r = (n.rr + n.jitter) * this.unit * k;
+      // Offset toward the left third: the doc panel occupies the right side, so
+      // centring the node exactly would put it under the panel.
+      this.target.k = k;
+      this.target.x = -Math.cos(a) * r - this.w * 0.14;
+      this.target.y = -Math.sin(a) * r;
+    }
+  }
+
+  clearFocus() {
+    this.focusId = null;
+    this.focusSet = null;
+    this.selected = null;
+  }
+
+  /* Ignite a node without moving the camera — used when hovering a citation
+     chip in an answer, so the map answers "where does this claim live?". */
+  ignite(id) {
+    if (!this.index[id]) return;
+    this.pulse.set(id, 1);
+    this.focusSet = this.neighbourhood(id);
+    this.focusId = id;
+  }
+
+  _lit(id) {
+    return !this.focusSet || this.focusSet.has(id);
   }
 
   _bind() {
@@ -472,13 +630,21 @@ export class Orbit {
     cv.addEventListener('wheel', (e) => {
       e.preventDefault();
       const f = e.deltaY < 0 ? 1.11 : 1 / 1.11;
-      this.view.k = Math.max(0.45, Math.min(4.2, this.view.k * f));
+      this.target.k = Math.max(0.45, Math.min(4.2, this.target.k * f));
+      this.view.k = this.target.k;      // wheel should feel direct, not eased
     }, { passive: false });
 
     cv.addEventListener('dblclick', () => this.reset());
     window.addEventListener('resize', () => this.resize());
   }
 
-  reset() { this.view = { x: 0, y: 0, k: 1 }; }
-  zoom(f) { this.view.k = Math.max(0.45, Math.min(4.2, this.view.k * f)); }
+  reset() {
+    this.target = { x: 0, y: 0, k: 1 };
+    this.clearFocus();
+    this.signals.length = 0;
+  }
+
+  zoom(f) {
+    this.target.k = Math.max(0.45, Math.min(4.2, this.target.k * f));
+  }
 }

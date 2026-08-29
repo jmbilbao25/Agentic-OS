@@ -4,9 +4,11 @@ Read-only over the vault by design: this app renders and searches markdown, it
 never authors it. Writing is `bin/os`, so that every change to memory goes through
 git and stays reviewable. See brain/wiki/Git Is The Disk.md
 """
+import asyncio
 import logging
 import secrets
 import subprocess
+import sys
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -151,6 +153,55 @@ async def api_ask(request: Request, u=Depends(user)):
 async def api_reindex(u=Depends(user)):
     from .index import build
     return build(full=False)
+
+
+# Automations, runnable from the UI. They shell out to the same modules the
+# systemd timers use, so a button press and a scheduled run are the same code
+# path — a dashboard that reimplements its own routines drifts from them.
+AUTOMATIONS = {
+    "radar":    ([sys.executable, "-m", "automations.radar", "--json"], 180),
+    "distill":  ([sys.executable, "-m", "automations.distill"], 420),
+    "research": ([sys.executable, "-m", "automations.research"], 300),
+}
+
+
+@app.post("/api/run/{name}")
+async def api_run(name: str, request: Request, u=Depends(user)):
+    if name not in AUTOMATIONS:
+        raise HTTPException(404, "unknown automation %r" % name)
+    cmd, timeout = AUTOMATIONS[name]
+    cmd = list(cmd)
+
+    if name == "research":
+        try:
+            body = await request.json()
+        except Exception:                            # noqa: BLE001
+            body = {}
+        topic = (body.get("topic") or "").strip()
+        if not topic:
+            raise HTTPException(400, "research needs a topic")
+        cmd.append(topic)
+
+    def go():
+        return subprocess.run(cmd, cwd=str(config.ROOT), capture_output=True,
+                              text=True, timeout=timeout)
+
+    try:
+        p = await asyncio.to_thread(go)
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, "%s timed out after %ss" % (name, timeout))
+
+    ok = p.returncode == 0
+    # Reindex so anything just written is immediately searchable, otherwise the
+    # user runs radar, searches for what it found, and gets nothing.
+    indexed = None
+    if ok:
+        from .index import build
+        indexed = build(full=False)
+
+    return {"ok": ok, "name": name, "code": p.returncode,
+            "stdout": (p.stdout or "")[-4000:], "stderr": (p.stderr or "")[-2000:],
+            "index": indexed}
 
 
 @app.post("/api/sync")

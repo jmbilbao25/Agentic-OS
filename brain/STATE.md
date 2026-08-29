@@ -17,8 +17,16 @@ visual second brain on an always-on server with hybrid search and a web UI.
 
 ## Vault layers
 `brain/raw/` capture → `brain/wiki/` atomic knowledge → `brain/output/` artifacts.
-Promote by rewriting, never by moving. Supporting: `STATE.md`, `lessons.md`,
-`journal/` (append-only), `decisions/`, `loops/`.
+Promote by rewriting, never by moving. Nothing automated writes to `wiki/`.
+
+## Automations (keyless, no API accounts)
+`bin/os radar` pulls 6 feeds (HN, arXiv, HF papers, HF models, GitHub, Lobsters)
+into `raw/`. `bin/os research "<topic>"` gathers on one topic. `bin/os distill`
+triages the newest capture into `output/`. Daily at 06:15 via systemd.
+
+## Skills
+`research`, `taste` (UI/writing/code/review rubrics), `skill-forge`,
+`loop-engineering`, `second-brain`. All file-set skills with routers.
 
 ## Environment facts
 - Sandboxes are ephemeral; **git is the only durable layer**. Push or lose it.

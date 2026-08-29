@@ -29,10 +29,10 @@ Four parts. This repo implements all four without depending on any one vendor.
 
 | | Part | Where it lives |
 |---|---|---|
-| **A** | Applications — what the agent reaches | `server/` micro-app + any MCP/CLI/API your harness has |
-| **R** | Routines — scheduled work | `systemd` timers in `deploy/` |
-| **M** | Memory — workspace and context | `brain/` + router files + the orbit UI |
-| **S** | Skills — SOPs as commands | `config/skills/`, bound into every harness |
+| **A** | Applications — what the agent reaches | `server/` micro-app, `automations/` connectors to 6 keyless feeds |
+| **R** | Routines — scheduled work | `systemd` timers: daily radar + digest, 15-min vault sync |
+| **M** | Memory — workspace and context | `brain/` raw→wiki→output + the orbit UI |
+| **S** | Skills — SOPs as commands | `config/skills/`: research, taste, skill-forge, loops, second-brain |
 
 ## Quickstart
 
@@ -96,6 +96,12 @@ bin/os lesson "When X → do Y."  # → brain/lessons.md
 bin/os decide "Title"           # → brain/decisions/
 bin/os recall "term"            # grep the vault
 bin/os loop new|next|done|close|status
+
+bin/os radar                    # 6 keyless feeds → brain/raw/
+bin/os research "topic"         # gather on one topic → brain/raw/
+bin/os distill                  # LLM triage of newest capture → brain/output/
+bin/os brief                    # radar + distill in one step
+
 bin/os dash                     # regenerate docs/index.html
 bin/os save "summary"           # dash + commit + push
 bin/os selftest                 # vault well-formed? bindings in sync?

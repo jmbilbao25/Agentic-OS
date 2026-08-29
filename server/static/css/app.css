@@ -328,3 +328,144 @@ html, body {
   .legend { display: none; }
   .status { display: none; }
 }
+
+
+/* ============================================================ boot overlay */
+/* Shows real telemetry while the graph loads. It is not a fake progress bar —
+   every line is a value read from the server, which is why it is allowed to
+   exist at all. Collapses the moment the map is ready. */
+
+#boot {
+  position: fixed; inset: 0; z-index: 90;
+  background: radial-gradient(circle at 50% 45%, #0a0713, #04060b 70%);
+  display: grid; place-content: center; justify-items: center; gap: 18px;
+  transition: opacity .45s ease, transform .45s ease;
+}
+#boot.gone { opacity: 0; transform: scale(1.04); pointer-events: none; }
+
+#boot .core { position: relative; width: 74px; height: 74px; }
+#boot .core i {
+  position: absolute; inset: 0; border-radius: 50%;
+  border: 1px dotted var(--memory); opacity: .55;
+  animation: spin 7s linear infinite;
+}
+#boot .core i:nth-child(2) {
+  inset: 11px; border-color: var(--routines);
+  animation-duration: 4.5s; animation-direction: reverse;
+}
+#boot .core i:nth-child(3) { inset: 22px; border-color: var(--applications); animation-duration: 9s; }
+#boot .core b {
+  position: absolute; inset: 30px; border-radius: 50%;
+  background: radial-gradient(circle at 32% 32%, #ffe0b8, var(--core) 60%, #a3491a);
+  box-shadow: 0 0 26px rgba(255, 138, 61, .85);
+  animation: breathe 2.6s ease-in-out infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes breathe { 50% { transform: scale(1.14); } }
+
+#boot .name {
+  font-size: 12px; letter-spacing: .34em; text-transform: uppercase;
+  color: var(--dim);
+}
+#boot .name b { color: var(--fg); }
+
+#boot-log {
+  margin: 0; font-family: var(--mono); font-size: 11.5px; line-height: 1.85;
+  color: var(--dimmer); min-height: 8.5em; min-width: 22rem;
+}
+#boot-log div { animation: fadein .28s ease both; }
+#boot-log .ok { color: #7ee0b8; }
+#boot-log .err { color: #ff9b8a; }
+@keyframes fadein { from { opacity: 0; transform: translateY(3px); } }
+
+/* ======================================================= status: coverage ring */
+
+.status { gap: 10px; }
+.status .dim { color: var(--dimmer); }
+.status .sep { padding-left: 10px; border-left: 1px solid var(--line); }
+.status .ring {
+  width: 13px; height: 13px; border-radius: 50%;
+  background: conic-gradient(#7ee0b8 calc(var(--p) * 1%), #1c2431 0);
+  position: relative; flex: none;
+}
+.status .ring::after {
+  content: ''; position: absolute; inset: 3.5px; border-radius: 50%;
+  background: var(--bg);
+}
+
+/* ================================================================= buttons */
+
+.btn.ghost { background: none; border-color: var(--line); color: var(--dim); }
+.btn.ghost:hover { color: var(--fg); border-color: var(--line-2); }
+.btn.solid {
+  background: var(--core); border-color: var(--core); color: #1e0e04; font-weight: 600;
+}
+.btn.solid:hover { background: #ffa05c; color: #1e0e04; }
+
+/* ========================================================= palette additions */
+
+#palette .slash {
+  font-family: var(--mono); font-size: 10px; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--core);
+  border: 1px solid rgba(255, 138, 61, .35); border-radius: 5px;
+  padding: 3px 7px; flex: none; min-width: 4.6rem; text-align: center;
+}
+.palfoot {
+  display: flex; gap: 14px; padding: 8px 14px; flex: none;
+  border-top: 1px solid var(--line);
+  font-size: 10.5px; color: var(--dimmer);
+}
+.palfoot kbd {
+  font-family: var(--mono); border: 1px solid var(--line-2);
+  border-radius: 3px; padding: 0 4px; margin-right: 3px;
+}
+
+/* ==================================================== citations ⇄ the map */
+/* Hovering one of these ignites the node it came from. The whole point of the
+   orbit view is that provenance becomes spatial rather than a path to read. */
+
+.cite {
+  display: inline-block; min-width: 15px; padding: 0 4px; margin: 0 1px;
+  font-family: var(--mono); font-size: 10px; line-height: 15px;
+  text-align: center; vertical-align: 1px; cursor: help;
+  color: var(--core); background: rgba(255, 138, 61, .12);
+  border: 1px solid rgba(255, 138, 61, .38); border-radius: 4px;
+  transition: background .12s, color .12s, transform .12s;
+}
+.cite:hover, .cite:focus {
+  background: var(--core); color: #1e0e04; outline: none; transform: translateY(-1px);
+}
+
+#ask .src .p { font-size: 11px; color: var(--dimmer); font-family: var(--mono); }
+#ask .src .dim { color: var(--dimmer); }
+
+/* ================================================== doc panel: neighbours */
+
+#doc .tag.lay { color: var(--memory); border-color: rgba(176, 108, 255, .35); }
+#doc .nbr {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  margin-bottom: 15px; padding-bottom: 14px; border-bottom: 1px solid var(--line);
+}
+#doc .nbr b {
+  font-size: 10px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--dimmer); margin-right: 3px; font-weight: 500;
+}
+.chip {
+  background: rgba(176, 108, 255, .09); color: #c9aaff;
+  border: 1px solid rgba(176, 108, 255, .28); border-radius: 999px;
+  padding: 3px 10px; font: inherit; font-size: 11.5px; cursor: pointer;
+  transition: background .12s, color .12s;
+}
+.chip:hover { background: rgba(176, 108, 255, .22); color: #fff; }
+
+/* ======================================================== reduced motion */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+  #boot .core i, #boot .core b { animation: none; }
+  .status .pill.partial { animation: none; }
+}

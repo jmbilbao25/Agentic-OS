@@ -74,13 +74,15 @@ say "building the search index"
 
 # ---------------------------------------------------------------- 7. systemd
 say "installing systemd units"
-for unit in agentos.service agentos-sync.service agentos-sync.timer; do
+for unit in agentos.service agentos-sync.service agentos-sync.timer \
+            agentos-radar.service agentos-radar.timer; do
   sed -e "s|__DIR__|$DIR|g" -e "s|__USER__|$USER|g" \
       "deploy/systemd/$unit" | sudo tee "/etc/systemd/system/$unit" >/dev/null
 done
 sudo systemctl daemon-reload
 sudo systemctl enable -q --now agentos.service
 sudo systemctl enable -q --now agentos-sync.timer
+sudo systemctl enable -q --now agentos-radar.timer
 
 sleep 3
 if curl -fsS --max-time 5 http://127.0.0.1:8000/healthz >/dev/null; then

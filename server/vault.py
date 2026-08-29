@@ -117,13 +117,20 @@ def load_system() -> List[Doc]:
         d = _read(skill, "skills", id_override="skills/%s" % skill.parent.name)
         d.ring = "skills"
         d.title = d.fm.get("name") or skill.parent.name
+        # Reference files are progressive-disclosure children of the skill, not
+        # peers of it. Rendering ui.md / writing.md / code.md as their own nodes
+        # made one skill look like four unrelated things and crowded the ring.
+        kids = sorted(p for p in skill.parent.glob("*.md") if p.name != "SKILL.md")
+        d.fm["files"] = ", ".join(p.stem for p in kids) if kids else ""
+        d.body += ("\n\n## Reference files\n\n"
+                   + "\n".join("- `%s`" % p.name for p in kids)) if kids else ""
         out.append(d)
 
-    for steer in sorted((root / "config").glob("**/*.md")):
-        if steer.name == "SKILL.md":
-            continue
-        d = _read(steer, "config",
-                  id_override="config/%s" % steer.stem)
+    # Steering and the portable kernel — top level of config/ only, so skill
+    # subdirectories are not swept up a second time.
+    for steer in sorted(list((root / "config").glob("*.md"))
+                        + list((root / "config" / "steering").glob("*.md"))):
+        d = _read(steer, "config", id_override="config/%s" % steer.stem)
         d.ring = "skills"
         out.append(d)
 

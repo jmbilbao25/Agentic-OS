@@ -12,15 +12,22 @@
 
 <canvas id="stage"></canvas>
 
+<!-- boot overlay: real telemetry, not a fake progress bar -->
+<div id="boot">
+  <div class="core"><i></i><i></i><i></i><b></b></div>
+  <div class="name">Agent<b>OS</b></div>
+  <pre id="boot-log"></pre>
+</div>
+
 <div class="topbar">
-  <span class="brand"><i class="mark"></i>Agent<b>OS</b>&nbsp;· second brain</span>
+  <span class="brand"><i class="mark"></i>Agent<b>OS</b></span>
   <span class="status" id="status"></span>
   <span class="spacer"></span>
   <button class="btn" data-act="search">Search <kbd>/</kbd></button>
   <button class="btn" data-act="ask">Ask <kbd>a</kbd></button>
-  <button class="btn" data-act="sync" title="git pull + reindex">Sync</button>
-  <button class="btn" data-act="reset" title="Reset view (0 / double-click)">Reset</button>
-  <button class="btn" data-act="help">?</button>
+  <button class="btn" data-act="cmd">Run <kbd>&gt;</kbd></button>
+  <button class="btn ghost" data-act="reset" title="Reset view">Reset</button>
+  <button class="btn ghost" data-act="help">?</button>
 </div>
 
 <div class="legend" id="legend"></div>
@@ -28,61 +35,74 @@
 <div class="tooltip" id="tip"></div>
 <div class="toast" id="toast"></div>
 
-<!-- command palette -->
+<!-- one input: search, ? to ask, > to run -->
 <section class="panel" id="palette">
   <div class="inputrow">
-    <span class="slash">/</span>
-    <input id="q" placeholder="search the vault — titles, text, meaning…"
+    <span class="slash" id="pal-mode">search</span>
+    <input id="q" placeholder="search your vault — or ? to ask, &gt; to run a command"
            autocomplete="off" spellcheck="false">
     <span class="hint" id="pal-hint"></span>
   </div>
   <div class="hits" id="hits"></div>
+  <div class="palfoot">
+    <span><kbd>↑↓</kbd> move</span><span><kbd>⏎</kbd> open</span>
+    <span><kbd>⇧⏎</kbd> ask instead</span><span><kbd>esc</kbd> close</span>
+  </div>
 </section>
 
-<!-- document preview -->
 <section class="panel" id="doc">
-  <header><span id="doc-title">document</span><button class="x">&times;</button></header>
+  <header><span id="doc-title">document</span><button class="x" title="close">&times;</button></header>
   <div class="body" id="doc-body"></div>
 </section>
 
-<!-- ask / RAG -->
 <section class="panel" id="ask">
-  <header><span>Ask your vault</span><button class="x">&times;</button></header>
+  <header><span>Ask your vault</span><button class="x" title="close">&times;</button></header>
   <div class="askrow">
-    <textarea id="ask-q" placeholder="What did I decide about storing memory in git?"
-              spellcheck="false"></textarea>
-    <button class="btn" data-act="send" title="Ctrl/Cmd + Enter">Ask</button>
+    <textarea id="ask-q" rows="2" spellcheck="false"
+      placeholder="What did I decide about storing memory, and why?"></textarea>
+    <button class="btn solid" data-act="send" title="Ctrl/Cmd + Enter">Ask</button>
   </div>
   <div class="body">
     <div class="answer md" id="ask-answer">
-      <p class="empty">Answers are grounded in your notes and cited by number.</p>
+      <p class="empty">Answers are grounded in your notes.
+        Hover a citation to light up the note it came from.</p>
     </div>
     <div class="sources" id="ask-sources"></div>
   </div>
 </section>
 
-<!-- help -->
-<section class="panel" id="help" style="top:62px;right:18px;width:min(340px,88vw)">
-  <header><span>Shortcuts</span><button class="x">&times;</button></header>
+<section class="panel" id="help">
+  <header><span>Shortcuts &amp; layout</span><button class="x">&times;</button></header>
   <div class="body">
     <div class="md">
       <table>
         <tr><th>key</th><th>does</th></tr>
-        <tr><td><code>/</code></td><td>search everything</td></tr>
+        <tr><td><code>/</code> <code>⌘K</code></td><td>search everything</td></tr>
+        <tr><td><code>?</code>…</td><td>type <code>?</code> in the bar to ask instead</td></tr>
+        <tr><td><code>&gt;</code></td><td>run a command (radar, distil, sync, research)</td></tr>
         <tr><td><code>a</code></td><td>ask your vault</td></tr>
-        <tr><td><code>↑ ↓</code></td><td>move through results</td></tr>
-        <tr><td><code>Enter</code></td><td>open result</td></tr>
-        <tr><td><code>Shift+Enter</code></td><td>ask instead of open</td></tr>
-        <tr><td><code>Esc</code></td><td>close panels</td></tr>
-        <tr><td><code>0</code></td><td>reset the view</td></tr>
-        <tr><td><code>+</code> / <code>-</code></td><td>zoom</td></tr>
+        <tr><td><code>r</code></td><td>run the AI radar now</td></tr>
+        <tr><td><code>↑↓</code> <code>⇥</code></td><td>move through results</td></tr>
+        <tr><td><code>⇧⏎</code></td><td>ask your query instead of opening it</td></tr>
+        <tr><td><code>esc</code></td><td>close panels, clear focus</td></tr>
+        <tr><td><code>0</code> <code>+</code> <code>-</code></td><td>reset view · zoom</td></tr>
         <tr><td>drag</td><td>pan · <b>wheel</b> zoom · <b>dblclick</b> reset</td></tr>
       </table>
-      <p>Rings are the ARMS layers, outermost first: <b>Applications</b> (shipped
-      output), <b>Routines</b> (loops), <b>Memory</b> (notes, journal, decisions),
-      <b>Skills</b> (procedures). The core is the kernel every agent boots from.</p>
-      <p>Click a ring name in the corner to hide it. Dot size is note length;
-      curves are <code>[[wikilinks]]</code>.</p>
+      <h3>The rings</h3>
+      <p>ARMS layers, outermost first: <b>Applications</b> (<code>output/</code>,
+      what you shipped), <b>Routines</b> (<code>loops/</code>), <b>Memory</b>
+      (<code>wiki/</code>, <code>raw/</code>, <code>journal/</code>,
+      <code>decisions/</code>), <b>Skills</b> (<code>config/skills/</code>). The
+      core is <code>AGENTS.md</code> — the kernel every harness boots from.</p>
+      <p>Dot size is note length. Curves are <code>[[wikilinks]]</code>. Clicking a
+      node dims everything more than one link away, so a dense graph stays
+      readable. Click a ring name to hide that layer.</p>
+      <h3>Automations</h3>
+      <p><b>radar</b> pulls six keyless feeds into <code>brain/raw/</code>.
+      <b>distil</b> triages the newest capture into <code>brain/output/</code>.
+      <b>research</b> gathers on one topic. Nothing writes to
+      <code>brain/wiki/</code> automatically — promotion to knowledge stays a
+      deliberate act.</p>
     </div>
   </div>
 </section>

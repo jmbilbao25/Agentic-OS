@@ -121,6 +121,25 @@ cmd_loop() {
 
 cmd_dash() { python3 "$PY" dash; }
 
+# --- automations. Prefer the venv if one exists: radar needs only stdlib, but
+# --- distill imports server/ and therefore httpx.
+_py() {
+  if [ -x "$ROOT/.venv/bin/python" ]; then echo "$ROOT/.venv/bin/python"; else echo python3; fi
+}
+
+cmd_radar()    { ( cd "$ROOT" && "$(_py)" -m automations.radar "$@" ); }
+cmd_research() {
+  [ $# -ge 1 ] || die 'usage: os research "<topic>" [--fetch N]'
+  ( cd "$ROOT" && "$(_py)" -m automations.research "$@" )
+}
+cmd_distill()  { ( cd "$ROOT" && "$(_py)" -m automations.distill "$@" ); }
+
+# radar + distill in one go, the shape the scheduled routine uses
+cmd_brief() {
+  cmd_radar || return 1
+  cmd_distill "$@" || echo "os: capture succeeded, digest did not (see above)" >&2
+}
+
 cmd_save() {
   cmd_dash
   local msg="${*:-brain: sync $(date -u '+%F %H:%MZ')}"
@@ -151,8 +170,12 @@ case "${1:-boot}" in
   decide) shift; cmd_decide "$@" ;;
   recall) shift; cmd_recall "$@" ;;
   loop) shift; cmd_loop "$@" ;;
+  radar) shift; cmd_radar "$@" ;;
+  research) shift; cmd_research "$@" ;;
+  distill) shift; cmd_distill "$@" ;;
+  brief) shift; cmd_brief "$@" ;;
   dash) cmd_dash ;;
   save) shift; cmd_save "$@" ;;
   selftest) cmd_selftest ;;
-  *) die "usage: os {boot|log|lesson|note|capture|ship|decide|recall|loop|dash|save|selftest}" ;;
+  *) die "usage: os {boot|log|lesson|note|capture|ship|decide|recall|loop|radar|research|distill|brief|dash|save|selftest}" ;;
 esac

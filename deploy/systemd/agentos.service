@@ -31,7 +31,15 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=__DIR__/server
+# The whole repo, not just server/. This was `__DIR__/server` while the app was
+# strictly read-only over the vault, and that stopped being true when it grew
+# endpoints that write: /api/run/radar writes brain/raw/ and brain/output/, and
+# /api/sync runs `git pull`, which writes .git/. Both failed with
+# "OSError: [Errno 30] Read-only file system" while the service itself looked
+# perfectly healthy — the scheduled timer kept working because it runs as its own
+# unit without this hardening, so only the UI buttons were broken.
+# Everything outside the repo stays read-only.
+ReadWritePaths=__DIR__
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

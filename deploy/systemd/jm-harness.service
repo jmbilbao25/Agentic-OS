@@ -54,7 +54,19 @@ Environment=NODE_OPTIONS=--max-old-space-size=256
 #
 # Host and port come from the overlay's `webserver` row (127.0.0.1:3080), not from
 # flags, so that the bind is stated in one place next to the reason for it.
-ExecStart=__NODE_BIN__/dsh web --patch __DIR__/deploy/harness/jm-agentic-os.cordis.yml --no-open
+# $DSH_EXTRA_ARGS comes from harness.env and is deliberately unbraced, because
+# systemd word-splits `$VAR` into separate arguments and does not split `${VAR}`.
+# It carries `--trusted-host <authority>` when the harness is served through a
+# reverse proxy.
+#
+# Without it, every /api call from a proxied browser returns 403 and the UI fails
+# in a way that looks like a backend outage: "Loading the provider directory
+# failed", "transport failure for /api/host.listDirectory". That is DSH's
+# Host/Origin fence doing its job — a DNS-rebinding defence that trusts loopback
+# plus whatever authorities the deployment declares. Caddy passes the original
+# Host through, so the fence sees the public hostname and refuses it until the
+# deployment says that name is legitimately ours.
+ExecStart=__NODE_BIN__/dsh web --patch __DIR__/deploy/harness/jm-agentic-os.cordis.yml --no-open $DSH_EXTRA_ARGS
 
 Restart=always
 RestartSec=5

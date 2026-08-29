@@ -106,6 +106,31 @@
     provider: openrouter
     model: z-ai/glm-5.3-flash
 
+# ── the OS's skills, as the agent's skills ───────────────────────────────────
+#
+# `config/skills/<name>/SKILL.md` is, by coincidence or good taste, exactly DSH's
+# skill format: a directory bundle whose frontmatter carries a kebab-case `name`
+# and a `description`. So the six skills this OS already has — taste, research,
+# second-brain, skill-forge, loop-engineering, gauntlet-loop — can be the harness's
+# skills directly, with no conversion step and no second copy to drift.
+#
+# Both rows are disabled by the web bundle, which moves per-agent skill discovery
+# behind agent presets ("presets own local discovery"). The same comment says
+# deployment-level providers still register into the registry's global layer, which
+# is what re-enabling them here does: one host-plane provider, every agent sees it.
+#
+# `customSkillDirs` is scanned after project roots and before user roots, and
+# `watch` is on by default — so a skill written or edited on disk reaches the next
+# model step without a restart.
+- id: skill-filesystem
+  disabled: false
+  config:
+    customSkillDirs: !!js '[`${process.env.AGENTOS_HOME}/config/skills`]'
+
+# Without this the catalogue exists and the model has no way to load from it.
+- id: tool-skill
+  disabled: false
+
 # ── the vault, as tools ──────────────────────────────────────────────────────
 - insert:
     - id: agentos-vault

@@ -51,6 +51,10 @@ Environment=PATH=__NODE_BIN__:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:
 # Also outside the repo, because DSH writes sessions and settings here and the repo
 # is now read-only to this unit.
 Environment=DSH_HOME=__DSH_HOME__
+
+# Where the vault lives, so the overlay can point DSH's skill discovery at
+# config/skills/ without hardcoding a path into a file that is in git.
+Environment=AGENTOS_HOME=__DIR__
 Environment=NODE_ENV=production
 # Node's default heap target assumes a machine with room. On a 1 GB box it will
 # happily grow past what is left after uvicorn and get OOM-killed mid-turn.

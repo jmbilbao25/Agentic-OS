@@ -179,11 +179,17 @@ about it, so the same server works with Claude Desktop, Cursor or anything else 
 speaks MCP. Implemented against Starlette directly, with no new dependency: the official
 Python SDK needs 3.10 and Amazon Linux 2023 ships 3.9.
 
-The agent has **no filesystem access to `brain/`** — its unit could not write a note if
-it tried. Every change goes over MCP, through a path jail, and lands as its own git
-commit. It cannot escape `brain/`; cannot edit `AGENTS.md`, `config/`, `server/` or
-`bin/` (an agent that can rewrite its own instructions has no stable behaviour left to
-reason about); cannot rewrite the append-only journal; and is capped per session.
+The vault is **read-only to the harness process**, enforced by the systemd sandbox
+rather than by policy — `ReadWritePaths` covers the agent's scratch workspace and DSH's
+own state, and nothing else on the box. That distinction is load-bearing: DSH composes
+its own `bash` and `fs` tools, which reach the filesystem directly and know nothing
+about the jail, so a jail alone would have been guarding a door that was not the only
+one. Every change goes over MCP, through the jail, and lands as its own git commit. It
+cannot escape `brain/`; cannot edit `AGENTS.md`, `config/`, `server/` or `bin/` (an
+agent that can rewrite its own instructions has no stable behaviour left to reason
+about); cannot rewrite the append-only journal; and is capped per session. The installer
+re-proves all of that on every run, because a security property that is not tested is
+just a comment.
 
 `brain/raw/` is text fetched from the internet, so it reaches the model inside an
 explicit untrusted-data envelope. That does not make prompt injection impossible — it

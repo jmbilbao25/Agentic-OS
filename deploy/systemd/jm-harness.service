@@ -8,6 +8,13 @@ Documentation=https://github.com/jmbilbao25/Agentic-OS
 After=network-online.target agentos.service
 Wants=network-online.target agentos.service
 
+# A crash loop against a missing key or a bad overlay should give up, not spin
+# forever. These belong in [Unit]: systemd silently ignores them under [Service],
+# which is how the first deployment of this unit restarted fourteen times in
+# ninety seconds while claiming a burst limit of six.
+StartLimitIntervalSec=120
+StartLimitBurst=6
+
 [Service]
 Type=simple
 User=__USER__
@@ -18,6 +25,15 @@ WorkingDirectory=__DIR__
 # harness needs; harness.env holds only what is specific to the harness.
 EnvironmentFile=__DIR__/server/.env
 EnvironmentFile=-__DIR__/deploy/harness/harness.env
+
+# The node directory has to be on PATH, not merely referenced by ExecStart.
+# `dsh` is a Node script whose shebang is `#!/usr/bin/env node`, so naming the
+# absolute path to the `dsh` shim is not enough — `env` still has to find `node`,
+# and systemd's default PATH is only /usr/local/sbin:/usr/local/bin:/usr/sbin:
+# /usr/bin:/sbin:/bin, none of which contain an nvm install. Without this the unit
+# dies instantly with status=127 and `/usr/bin/env: 'node': No such file or
+# directory`, which looks nothing like a PATH problem in the journal.
+Environment=PATH=__NODE_BIN__:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 Environment=DSH_HOME=__DIR__/.dsh
 Environment=NODE_ENV=production
@@ -42,9 +58,6 @@ ExecStart=__NODE_BIN__/dsh web --patch __DIR__/deploy/harness/jm-agentic-os.cord
 
 Restart=always
 RestartSec=5
-# A crash loop against a missing API key should give up rather than spin.
-StartLimitIntervalSec=120
-StartLimitBurst=6
 
 # The box has ~950 MB and agentos.service is already capped at 700M. These two
 # ceilings deliberately oversubscribe: both processes idle far below their cap,

@@ -1,0 +1,67 @@
+# Optional: publish the JM Agentic-OS Harness over HTTPS, with a password.
+#
+# READ THIS BEFORE USING IT.
+#
+# The DSH web app has no authentication of its own. It assumes it is bound to
+# loopback on a machine you already control, which is exactly how
+# deploy/harness/jm-agentic-os.cordis.yml configures it. Everything below exists
+# to put the missing password in front of it.
+#
+# What is behind this proxy is not a document viewer. It is an agent with tools
+# that can create, edit and delete notes in your vault, and it holds your
+# OpenRouter key. Anyone who gets past this password gets all of that. The
+# blast radius is bounded — writes are jailed to brain/, the journal is
+# append-only, the kernel and skills are unwritable, and every change is a
+# revertable git commit — but "recoverable" is not "harmless".
+#
+# The safer option, and the default, is not to use this file at all:
+#
+#     ssh -N -L 3080:127.0.0.1:3080 ec2-user@<host>
+#     open http://127.0.0.1:3080
+#
+# That needs no password, no certificate and no open port, because the port is
+# never published in the first place.
+#
+# ── if you do publish it ─────────────────────────────────────────────────────
+#
+# 1. Generate a hash. Never put a plaintext password in a config file:
+#
+#      caddy hash-password --plaintext 'a long random passphrase'
+#
+# 2. Substitute __HARNESS_HOST__ and __HARNESS_HASH__.
+#    deploy/install-harness.sh does both when PUBLISH_HARNESS=1.
+#
+# 3. Use a *different* password from the vault UI's. They are separate surfaces
+#    with different consequences, and reusing one password means a leak of the
+#    weaker surface hands over the stronger one.
+
+__HARNESS_HOST__ {
+	encode zstd gzip
+
+	basic_auth {
+		# `caddy hash-password` output — bcrypt, safe to commit only because it
+		# is a hash. Still: keep it out of a public repo.
+		harness __HARNESS_HASH__
+	}
+
+	# The harness streams tokens over a long-lived response. Caddy buffers
+	# nothing by default, but the timeouts still have to be long enough for a
+	# reasoning model to think, or a turn dies mid-sentence and looks like a
+	# model failure rather than a proxy one.
+	reverse_proxy 127.0.0.1:3080 {
+		header_up X-Forwarded-For {remote_host}
+		transport http {
+			read_timeout 30m
+			write_timeout 30m
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		# The harness UI is not meant to be embedded anywhere.
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		-Server
+	}
+}

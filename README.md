@@ -108,6 +108,19 @@ concentric ARMS rings, `/` to search, click to read, `j`/`k` to walk the link gr
 answers questions over it with citations, and runs a build-and-critique loop against a
 real reference.
 
+Four arrangements of the same notes, switched with `1`–`4`:
+
+| | |
+|---|---|
+| **Rings** | The ARMS zones, orbiting. The default. Positions are deterministic, so spatial memory survives a reload. |
+| **Rank** | A line ordered by relevance — search, and the dots line up best-first. Filtered-out notes drop to the tail rather than leaving holes, because a gap in a ranked line says nothing, where a gap in a timeline says "nothing survived that week". |
+| **Grid** | Dense and alphabetical, for scanning by name. |
+| **Timeline** | A line ordered by date. Pairs with the recency scrubber, which cuts a threshold this shows you the shape of. |
+
+A layout is a pure function to target positions; the renderer owns motion and
+interpolates from wherever the last layout left each node, which is what makes
+switching an animation rather than a redraw. See `brain/wiki/Frame Beats Canvas.md`.
+
 Retrieval is **hybrid**: SQLite FTS5 (BM25) for keywords, `sqlite-vec` for semantics,
 fused with weighted Reciprocal Rank Fusion, plus a bounded nudge for queries that look
 like they are *naming* a note — because neither half of a hybrid ranker can see a
@@ -148,6 +161,34 @@ deploy/provision.sh
 ```
 
 See `deploy/README.md` and the `deploy-always-on` loop ledger.
+
+## The harness
+
+The map answers *"what do I know?"*. The **JM Agentic-OS Harness** answers *"do
+something with what I know"* — an agent that plans, researches against the vault, and
+writes back to it. Built on [DSH](https://github.com/deepseek-ai/deepseek-harness),
+running GLM 5.3 Flash through OpenRouter.
+
+```bash
+bash deploy/install-harness.sh                  # on the box, after provision.sh
+ssh -N -L 3080:127.0.0.1:3080 <user>@<box>      # loopback-only on purpose
+```
+
+The vault **publishes itself** as ten MCP tools rather than the harness being taught
+about it, so the same server works with Claude Desktop, Cursor or anything else that
+speaks MCP. Implemented against Starlette directly, with no new dependency: the official
+Python SDK needs 3.10 and Amazon Linux 2023 ships 3.9.
+
+The agent has **no filesystem access to `brain/`** — its unit could not write a note if
+it tried. Every change goes over MCP, through a path jail, and lands as its own git
+commit. It cannot escape `brain/`; cannot edit `AGENTS.md`, `config/`, `server/` or
+`bin/` (an agent that can rewrite its own instructions has no stable behaviour left to
+reason about); cannot rewrite the append-only journal; and is capped per session.
+
+`brain/raw/` is text fetched from the internet, so it reaches the model inside an
+explicit untrusted-data envelope. That does not make prompt injection impossible — it
+makes the damage bounded, visible and revertable. `deploy/harness/README.md` is honest
+about where the line is.
 
 ## What this deliberately does not do
 

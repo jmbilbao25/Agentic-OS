@@ -1,0 +1,59 @@
+# DSH user settings for the JM Agentic-OS Harness.
+#
+# Install to $DSH_HOME/settings.yaml (default ~/.dsh/settings.yaml). Hot-reloaded:
+# editing it takes effect on the next request, with no restart.
+#
+# Why this file exists separately from the cordis patch: which LLM *adapters* are
+# mounted is composition (the patch), but which *providers* actually run is user
+# settings. The pi-ai adapter mounts dormant with zero routes and registers them
+# the moment this section supplies profiles. This is also exactly what the web
+# Models page writes, so anything set here can be changed from the UI later.
+
+llm-pi-ai:
+  providers:
+    # The route key IS the provider name referenced by `agent-default-model` in
+    # jm-agentic-os.cordis.yml. Renaming it here means renaming it there.
+    openrouter:
+      displayName: OpenRouter
+      # OpenRouter is not in pi-ai's installed catalog, so this route has to
+      # declare its own protocol, endpoint and model list — a route the catalog
+      # does not ship is refused outright without all three.
+      api: openai-completions
+      baseURL: https://openrouter.ai/api/v1
+      # A reference to an environment variable, resolved per request through the
+      # credential seam. The key itself never enters this file.
+      apiKeyEnv: OPENROUTER_API_KEY
+
+      models:
+        # The default, because it is the cheapest one that reliably answers.
+        # $0.075/M prompt, and it reasons and calls tools. 1.3M context.
+        - id: z-ai/glm-5.3-flash
+          name: GLM 5.3 Flash
+          contextWindow: 1310720
+          # Deliberately far below the model's ceiling. Configuring maxTokens also
+          # makes it this model's per-request default, and a default of "as much
+          # as possible" invites a single answer that costs minutes and fills the
+          # context window.
+          maxTokens: 32768
+          input: [text, image]
+
+        # Free, 256k context, supports tool calling — and rate-limited upstream
+        # often enough to fail the first message of a session. Kept because when
+        # it works it costs nothing; not the default because a harness whose
+        # opening turn 429s looks broken rather than busy.
+        - id: z-ai/glm-5.2:free
+          name: GLM 5.2 (free — rate-limits)
+          contextWindow: 256000
+          maxTokens: 16384
+
+        # Full GLM 5.2 for work that warrants it. ~16x the price of Flash.
+        - id: z-ai/glm-5.2
+          name: GLM 5.2
+          contextWindow: 1048576
+          maxTokens: 32768
+
+      # Attribution headers. OpenRouter uses these for its rankings page and, more
+      # usefully, they make this deployment identifiable in your own usage log.
+      headers:
+        HTTP-Referer: https://github.com/jmbilbao25/Agentic-OS
+        X-Title: JM Agentic-OS Harness

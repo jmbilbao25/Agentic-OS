@@ -1,12 +1,18 @@
 """The visual second brain.
 
-Read-only over the vault by design: this app renders, searches and reasons over
-markdown, it never authors it. Writing is `bin/os`, so that every change to memory
-goes through git and stays reviewable. See brain/wiki/Git Is The Disk.md
+The HTTP API is read-only over the vault: this app renders, searches and reasons
+over markdown, it never authors it. Writing is `bin/os`, so that every change to
+memory goes through git and stays reviewable. See brain/wiki/Git Is The Disk.md
 
-The one exception is settings.local.json, which is machine state rather than
-memory — it holds an API key and a model choice, neither of which belongs in a
-git history.
+Two exceptions, both deliberate:
+
+  - settings.local.json is machine state rather than memory — it holds an API key
+    and a model choice, neither of which belongs in a git history.
+  - /mcp, when `AGENTOS_MCP_TOKEN` is set, exposes the vault to an external agent
+    *including* write tools. It is a separate surface with separate auth (bearer
+    token, loopback-only by default), it is absent entirely when unconfigured, and
+    every write it performs is its own git commit. See server/mcp.py for the
+    threat model; the invariant above still holds for everything under /api/.
 """
 import asyncio
 import json
@@ -22,7 +28,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import auth, config, embed, gauntlet, llm, search, settings, vault
+from . import auth, config, embed, gauntlet, llm, mcp, search, settings, vault
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -43,6 +49,12 @@ app.add_middleware(
 )
 
 app.include_router(auth.router, prefix="/auth", tags=["auth"])
+
+# The MCP endpoint for the JM Agentic-OS Harness. Registers nothing at all unless
+# AGENTOS_MCP_TOKEN is set, so the default deployment has no write surface.
+MCP_MOUNTED = mcp.register(app)
+log.info("MCP endpoint: %s", "/mcp (bearer auth)" if MCP_MOUNTED
+         else "disabled (set AGENTOS_MCP_TOKEN to enable)")
 
 if config.STATIC.is_dir():
     app.mount("/static", StaticFiles(directory=str(config.STATIC)), name="static")
@@ -74,7 +86,7 @@ async def security_headers(request: Request, call_next):
 
 @app.on_event("startup")
 async def startup():
-    for p in config.problems():
+    for p in config.problems() + mcp.problems():
         log.warning("config: %s", p)
     if not config.SESSION_SECRET:
         log.warning("SESSION_SECRET unset — using an ephemeral key; sessions drop "
@@ -147,7 +159,10 @@ async def status(u=Depends(user)):
                       or settings.get("LLM_MODEL"),
             "ceiling": settings.get("GAUNTLET_MAX_ROUNDS"),
         },
-        "problems": config.problems(),
+        "problems": config.problems() + mcp.problems(),
+        "mcp": {"enabled": MCP_MOUNTED,
+                "loopback_only": MCP_MOUNTED and not mcp.ALLOW_REMOTE,
+                "tools": len(mcp.TOOLS) if MCP_MOUNTED else 0},
     }
 
 

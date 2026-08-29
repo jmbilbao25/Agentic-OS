@@ -1,0 +1,89 @@
+[Unit]
+Description=JM Agentic-OS Harness (agent front end, built on DSH)
+Documentation=https://github.com/jmbilbao25/Agentic-OS
+# Ordered after the vault, but not bound to it: the MCP client reconnects with
+# backoff, so the harness surviving an agentos restart is a feature. `Wants`
+# rather than `Requires` for the same reason — a vault that fails to start should
+# not take the UI down with it.
+After=network-online.target agentos.service
+Wants=network-online.target agentos.service
+
+# A crash loop against a missing key or a bad overlay should give up, not spin
+# forever. These belong in [Unit]: systemd silently ignores them under [Service],
+# which is how the first deployment of this unit restarted fourteen times in
+# ninety seconds while claiming a burst limit of six.
+StartLimitIntervalSec=120
+StartLimitBurst=6
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__DIR__
+
+# Two files, split by lifetime rather than by tidiness. server/.env is the vault's
+# own config and holds OPENROUTER_API_KEY + AGENTOS_MCP_TOKEN, both of which the
+# harness needs; harness.env holds only what is specific to the harness.
+EnvironmentFile=__DIR__/server/.env
+EnvironmentFile=-__DIR__/deploy/harness/harness.env
+
+# The node directory has to be on PATH, not merely referenced by ExecStart.
+# `dsh` is a Node script whose shebang is `#!/usr/bin/env node`, so naming the
+# absolute path to the `dsh` shim is not enough — `env` still has to find `node`,
+# and systemd's default PATH is only /usr/local/sbin:/usr/local/bin:/usr/sbin:
+# /usr/bin:/sbin:/bin, none of which contain an nvm install. Without this the unit
+# dies instantly with status=127 and `/usr/bin/env: 'node': No such file or
+# directory`, which looks nothing like a PATH problem in the journal.
+Environment=PATH=__NODE_BIN__:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+Environment=DSH_HOME=__DIR__/.dsh
+Environment=NODE_ENV=production
+# Node's default heap target assumes a machine with room. On a 1 GB box it will
+# happily grow past what is left after uvicorn and get OOM-killed mid-turn.
+Environment=NODE_OPTIONS=--max-old-space-size=256
+
+# Argument order is load-bearing and not obvious. `--patch` is a launcher flag, so
+# it must sit immediately after `web` and before any of the web app's own flags:
+#
+#   dsh web --patch F --no-open     works
+#   dsh web --no-open --patch F     error: unknown option '--patch'
+#   dsh --patch F web               error: web takes none of parent --patch
+#
+# (`dsh --profile web --patch F --no-open` is the equivalent long form.) The
+# published 0.1.1-rc.2 is stricter here than the examples in DSH's own docs, which
+# are written against a newer unreleased build.
+#
+# Host and port come from the overlay's `webserver` row (127.0.0.1:3080), not from
+# flags, so that the bind is stated in one place next to the reason for it.
+ExecStart=__NODE_BIN__/dsh web --patch __DIR__/deploy/harness/jm-agentic-os.cordis.yml --no-open
+
+Restart=always
+RestartSec=5
+
+# The box has ~950 MB and agentos.service is already capped at 700M. These two
+# ceilings deliberately oversubscribe: both processes idle far below their cap,
+# and the 2 GB swapfile provision.sh creates absorbs the overlap. MemoryHigh
+# throttles this unit before the kernel starts choosing victims. If the harness
+# is still being killed, lower MemoryHigh in agentos.service to 420M — the vault
+# only needs its full allowance during a cold embedding pass.
+MemoryMax=340M
+MemoryHigh=280M
+
+# hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# Sessions, logs and the settings document live under DSH_HOME inside the repo,
+# so the repo is the only writable path. Note this is NOT how the harness reaches
+# the vault: it has no filesystem access to brain/ and could not write a note if
+# it tried. Every vault change goes over MCP, through the path jail in
+# server/authoring.py, and lands as its own git commit.
+ReadWritePaths=__DIR__
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

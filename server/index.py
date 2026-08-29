@@ -141,16 +141,20 @@ def build(full=False):
             db.commit()
             log.info("embedded %d/%d", embedded, len(pending))
 
-    mode = "hybrid" if (vec_ok and embedded) else "keyword"
+    total = db.execute("SELECT COUNT(*) c FROM chunks").fetchone()["c"]
+    vtotal = (db.execute("SELECT COUNT(*) c FROM chunks_vec").fetchone()["c"]
+              if vec_ok else 0)
+
+    # Mode describes the INDEX, not this run. An incremental run with nothing to
+    # do embeds zero chunks, and deriving the mode from that count made a fully
+    # hybrid index report itself as keyword-only the first time the sync timer
+    # fired. What matters is whether vectors are present and loadable.
+    mode = "hybrid" if (vec_ok and vtotal) else "keyword"
     for k, v in (("built", str(int(time.time()))), ("mode", mode),
                  ("docs", str(len(docs))), ("embed_model", config.EMBED_MODEL),
                  ("vault", str(config.VAULT))):
         db.execute("INSERT OR REPLACE INTO meta VALUES (?,?)", (k, v))
     db.commit()
-
-    total = db.execute("SELECT COUNT(*) c FROM chunks").fetchone()["c"]
-    vtotal = (db.execute("SELECT COUNT(*) c FROM chunks_vec").fetchone()["c"]
-              if vec_ok else 0)
     db.close()
 
     summary = {

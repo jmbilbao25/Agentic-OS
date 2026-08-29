@@ -5,7 +5,7 @@
  * node it came from, so "where does this claim live?" is answered by the map
  * rather than by reading a path.
  */
-import { Orbit, RINGS } from './orbit.js';
+import { Orbit, RINGS, LAYOUTS } from './orbit.js';
 import { md } from './md.js';
 
 const $ = (s) => document.querySelector(s);
@@ -76,6 +76,13 @@ async function boot() {
     orbit.setData(graph.nodes, graph.edges);
     orbit.start();
     renderLegend();
+    renderDock();
+    // Let the renderer own the active-layout state. Toggling the button class at
+    // the click site meant a layout changed any other way (keyboard, console,
+    // future code) left the control lying about what was on screen.
+    orbit.onLayout = (name) => {
+      $$('#seg-layout button').forEach((b) => b.classList.toggle('on', b.dataset.layout === name));
+    };
     renderStatus(graph.stats, status);
 
     bootEl.classList.add('gone');
@@ -93,6 +100,42 @@ function renderLegend() {
     <button data-ring="${r.id}" style="color:${r.color}" title="show/hide ${r.label.toLowerCase()}">
       <i class="sw"></i><span>${r.label}</span><span class="n">${r.count}</span>
     </button>`).join('');
+}
+
+/* Control dock. Every control changes something observable, and the layout
+   buttons are the reason the layout engine exists — switching them tweens every
+   node to its new home instead of cutting. */
+function renderDock() {
+  $('#dock').innerHTML = `
+    <div class="grp">
+      <label>Layout</label>
+      <div class="seg" id="seg-layout">
+        ${LAYOUTS.map((l) => `<button data-layout="${l}"
+          class="${l === orbit.layout ? 'on' : ''}">${l}</button>`).join('')}
+      </div>
+    </div>
+    <div class="grp">
+      <label>Labels</label>
+      <div class="seg" id="seg-labels">
+        ${['auto', 'all', 'none'].map((v) => `<button data-labels="${v}"
+          class="${v === orbit.showLabels ? 'on' : ''}">${v}</button>`).join('')}
+      </div>
+    </div>
+    <div class="grp">
+      <label>Ring spin <b id="v-spin">${orbit.spinRate.toFixed(3)}</b></label>
+      <input type="range" id="r-spin" min="0" max="0.12" step="0.004"
+             value="${orbit.spinRate}">
+    </div>
+    <div class="grp">
+      <label>Node size <b id="v-size">${orbit.nodeScale.toFixed(2)}</b></label>
+      <input type="range" id="r-size" min="0.5" max="2.4" step="0.05"
+             value="${orbit.nodeScale}">
+    </div>
+    <div class="grp row">
+      <button class="btn ghost sm" data-act="zin">+</button>
+      <button class="btn ghost sm" data-act="zout">−</button>
+      <button class="btn ghost sm" data-act="reset">reset</button>
+    </div>`;
 }
 
 function renderStatus(stats, status) {
@@ -140,6 +183,11 @@ async function openDoc(id, { move = true } = {}) {
       <div class="meta"><span class="tag lay">${doc.layer}</span>${tags}${fm}</div>
       <div class="pathrow"><code>${doc.path}</code>
         <button data-copy="${doc.path}">copy</button></div>
+      <div class="acts">
+        <button class="btn ghost sm" data-fly="${id}">Fly to</button>
+        <button class="btn ghost sm" data-copy="${doc.path}">Copy path</button>
+        <span class="dim">${(doc.size / 1024).toFixed(1)} KB · ${node.words} words</span>
+      </div>
       ${nb.length ? `<div class="nbr"><b>${nb.length} linked</b>${nb.map((x) =>
         `<button class="chip" data-open="${x}">${state.byId[x]?.title || x}</button>`).join('')}</div>` : ''}
       <div class="md">${md(doc.body, { exists: (n) => state.titles.has(n.toLowerCase()) })}</div>`;
@@ -415,8 +463,19 @@ orbit.onHover = (n, x, y) => {
 };
 
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-open],[data-ring],[data-copy],[data-wl],[data-act],[data-idx],.x');
+  const t = e.target.closest('[data-open],[data-ring],[data-copy],[data-wl],[data-act],[data-idx],[data-layout],[data-labels],[data-fly],.x');
   if (!t) return;
+  if (t.dataset.layout) {
+    orbit.setLayout(t.dataset.layout);
+    toast(`layout: ${t.dataset.layout}`);
+    return;
+  }
+  if (t.dataset.labels) {
+    orbit.showLabels = t.dataset.labels;
+    $$('#seg-labels button').forEach((b) => b.classList.toggle('on', b === t));
+    return;
+  }
+  if (t.dataset.fly) { orbit.flyTo(t.dataset.fly); return; }
   if (t.dataset.idx !== undefined) { commitPal(+t.dataset.idx); return; }
   if (t.dataset.open) { openDoc(t.dataset.open); closePalette(); return; }
   if (t.dataset.wl) { jumpToTitle(t.dataset.wl); return; }
@@ -438,6 +497,8 @@ document.addEventListener('click', (e) => {
     case 'ask': openAsk(); break;
     case 'send': ask($('#ask-q').value); break;
     case 'reset': orbit.reset(); toast('view reset'); break;
+    case 'zin': orbit.zoom(1.3); break;
+    case 'zout': orbit.zoom(1 / 1.3); break;
     case 'help': $('#help').classList.toggle('open'); break;
   }
 });
@@ -455,6 +516,16 @@ document.addEventListener('pointerout', (e) => {
 document.addEventListener('focusin', (e) => {
   const c = e.target.closest('[data-cite]');
   if (c) orbit.ignite(c.dataset.cite);
+});
+
+document.addEventListener('input', (e) => {
+  if (e.target.id === 'r-spin') {
+    orbit.spinRate = +e.target.value;
+    $('#v-spin').textContent = orbit.spinRate.toFixed(3);
+  } else if (e.target.id === 'r-size') {
+    orbit.nodeScale = +e.target.value;
+    $('#v-size').textContent = orbit.nodeScale.toFixed(2);
+  }
 });
 
 $('#q').addEventListener('input', (e) => route(e.target.value));
@@ -497,6 +568,14 @@ document.addEventListener('keydown', (e) => {
   }
   else if (e.key === 'a') { e.preventDefault(); openAsk(); }
   else if (e.key === 'r') { e.preventDefault(); runJob('radar'); }
+  else if (e.key === 'l') {
+    // cycle layouts — the fastest way to see the transition
+    e.preventDefault();
+    const next = LAYOUTS[(LAYOUTS.indexOf(orbit.layout) + 1) % LAYOUTS.length];
+    orbit.setLayout(next);
+    toast(`layout: ${next}`);
+  }
+  else if (e.key === 'd') { e.preventDefault(); $('#dock').classList.toggle('hide'); }
   else if (e.key === '0') orbit.reset();
   else if (e.key === '+' || e.key === '=') orbit.zoom(1.25);
   else if (e.key === '-') orbit.zoom(1 / 1.25);

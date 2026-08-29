@@ -110,7 +110,10 @@ async def api_graph(u=Depends(user)):
 
 @app.get("/api/doc")
 async def api_doc(id: str, u=Depends(user)):
-    for d in vault.load():
+    # Must search system docs too. /api/graph returns skills, steering and the
+    # kernel as nodes, so searching only the vault made every one of those nodes
+    # clickable but unopenable — a 404 on something the map had just drawn.
+    for d in vault.load() + vault.load_system():
         if d.id == id:
             return d.public()
     raise HTTPException(404, "no document %r" % id)

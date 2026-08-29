@@ -125,10 +125,12 @@ Auth is a single username + password (PBKDF2, per-IP lockout). Set it with
 
 ## Always-on
 
-`deploy/` provisions an EC2 `t3.micro` (~$10/mo) with swap, a venv, systemd units for
-the app and a reindex timer, and TLS via Tailscale Funnel — no domain purchase, no
-inbound port. Inference stays remote on purpose: a box that can hold a useful model
-costs ~10x a box that can hold an index, and is worse at it.
+`deploy/` provisions an EC2 `t3.micro` (~$10/mo) with swap, a venv, systemd units
+for the app and a reindex timer, and **automatic TLS** — Caddy plus a real Let's
+Encrypt certificate on `<dashed-ip>.sslip.io`, so you get trusted HTTPS with no
+domain purchase and no interactive login. Inference stays remote on purpose: a box
+that can hold a useful model costs ~10x one that can hold an index, and is worse
+at it.
 
 ```bash
 deploy/launch-ec2.sh      # from AWS CloudShell

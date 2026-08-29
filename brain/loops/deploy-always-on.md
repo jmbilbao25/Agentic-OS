@@ -21,17 +21,19 @@ cites real note paths; a `systemd` timer has pulled from git and reindexed unatt
 at least once; and the whole thing comes back by itself after `sudo reboot`.
 
 # Steps
-- [ ] launch the instance — `deploy/launch-ec2.sh` from CloudShell (t3.micro, 30 GB gp3, SG allows only 22 in)
-- [ ] `deploy/provision.sh` on the box — swap, python venv, deps, clone, systemd units
-- [ ] set the password with `python -m server.tools.setpass`, put `OPENROUTER_API_KEY` in `server/.env`
-- [ ] `tailscale up` then `tailscale funnel 8000` — confirm the public HTTPS hostname resolves
-- [ ] set `AGENTOS_BASE_URL` to the funnel hostname, restart, sign in over HTTPS
-- [ ] confirm a wrong password is rejected and repeated failures return 429 (the security test, not a formality)
-- [ ] `agentos-index` once — confirm FTS5 + vector row counts match the file count
-- [ ] load the orbit UI in a browser, search with `/`, open a note, confirm the preview renders
+- [x] launch the instance (t3.micro, 30 GB gp3, AL2023)
+- [x] provision the box — swap, python 3.11 venv, deps, clone, systemd units
+- [x] set the login password with `python -m server.tools.setpass`
+- [x] TLS: Caddy + Let's Encrypt on `<dashed-ip>.sslip.io`, certificate obtained
+- [x] set `AGENTOS_BASE_URL` to the https host, restart, sign in over HTTPS from outside
+- [x] confirm a wrong password is rejected and repeated failures return 429 (the security test, not a formality)
+- [x] index built on the box — confirm FTS5 + vector row counts match the file count
+- [x] load the orbit UI in a browser, search with `/`, open a note, confirm the preview renders
+- [x] `sudo reboot`, then confirm it comes back with no manual intervention
+- [x] `agentos-sync.timer` enabled — confirm an unattended git pull + reindex
+- [ ] put `OPENROUTER_API_KEY` in `server/.env` (openrouter.ai/keys) and restart
 - [ ] ask one RAG question, verify every citation points at a file that actually exists
-- [ ] enable the `agentos-sync.timer`, wait for one unattended run, confirm git pull + reindex in the log
-- [ ] `sudo reboot`, then re-run the `check` command with no manual intervention
+- [ ] rotate the EC2 keypair and narrow the SSH source from 0.0.0.0/0 to one IP
 - [ ] set a billing alarm at $20/mo and record the real observed cost in Notes
 
 # Notes
@@ -53,3 +55,30 @@ at least once; and the whole thing comes back by itself after `sudo reboot`.
 - Do not delete anything from `brain/` because the index can answer faster. The index is
   a cache; deleting the markdown trades an auditable artifact for a database you cannot
   diff. See [[Git Is The Disk]].
+
+## 2026-08-29 — deployed and verified
+
+Live at `https://13-218-239-165.sslip.io`. Measured on the box, not assumed:
+
+- 913 MB RAM, 2 vCPU, 30 GB disk. App uses **247 MB against a 700 MB systemd cap**;
+  host sits at ~354 MB with 0 MB of swap touched. The 2 GB swap file was still worth
+  creating — the `onnxruntime` install is the peak, not the steady state.
+- Index: 15 docs / 63 chunks / **63 vectors**, hybrid. Full build took 42 s including
+  the first-run model download.
+- Reboot test: back in **~30 s** with `agentos`, `caddy`, and the sync timer all
+  active, nothing started by hand.
+- TLS: real Let's Encrypt certificate, `ssl_verify_result=0` verified from outside.
+  `sslip.io` needs no DNS account and no token, which makes it strictly less work
+  than DuckDNS *and* than Tailscale Funnel for a box that already has 80/443 open.
+- Port 8000 confirmed **not** reachable publicly; Caddy is the only listener.
+
+Two bugs the deploy found that local testing had not:
+
+1. `meta.mode` was derived from how many chunks *that run* embedded, so the first
+   incremental run by the sync timer relabelled a fully hybrid index as
+   "keyword-only". The status pill was lying. Mode now describes the index.
+2. Caddy's packaged systemd unit is sandboxed and cannot write `/var/log/caddy`, so
+   a `log { output file … }` block makes the whole config fail to load. Journald only.
+
+Lesson worth keeping: **a deploy is a test.** Both bugs were invisible in the
+sandbox and immediate on the box.

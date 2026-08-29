@@ -28,20 +28,23 @@ Promote by rewriting, never by moving. Supporting: `STATE.md`, `lessons.md`,
 - Model access is not transferable between vendors; keep the provider behind one
   env var. See [[Model Access Is Not Transferable]].
 
-## The stack on the server
-- Host: EC2 `t3.micro` + 30 GB gp3, ~$10/mo, inside the credit-based free tier.
+## The stack on the server — LIVE
+- `https://13-218-239-165.sslip.io` — EC2 `t3.micro`, ~$10/mo. Deployed and
+  reboot-tested 2026-08-29. App uses 247MB of a 700MB systemd cap.
 - Retrieval: SQLite FTS5 (BM25) + sqlite-vec, fused with RRF. Index is
   disposable; markdown is truth. See [[Grep Beats Embeddings Here]].
 - Embeddings: quantised MiniLM, CPU-only, on-box. Inference: remote,
   OpenAI-compatible, currently OpenRouter free tier.
-- Auth: single username + password (PBKDF2, per-IP lockout). TLS via Tailscale Funnel.
+- Auth: user `jm`, password (PBKDF2, per-IP lockout). TLS: Caddy + real Let's
+  Encrypt cert on sslip.io — no domain, no DNS account, fully automatic.
 - Why a server at all: [[Local Runtime Closes The Gaps]].
 
 ## Blocked on the user
-- Add `OPENROUTER_API_KEY` to `server/.env` (openrouter.ai/keys, free tier).
-- Publish over HTTPS: `tailscale up && tailscale funnel --bg 8000`. The password
-  travels in the clear until this is done.
-- Rotate the EC2 keypair — the private key was pasted into a chat transcript.
+- Add `OPENROUTER_API_KEY` to `server/.env` — the only thing between the live box
+  and working RAG answers. Search already works without it.
+- **Rotate the EC2 keypair**: the private key was pasted into a chat transcript,
+  and the SG still allows SSH from `0.0.0.0/0`. Narrow it to one IP.
+- Set a billing alarm at $20/mo.
 - Install `config/kernel-global.md` at the harness's global scope so repo-less
   sessions still boot.
 

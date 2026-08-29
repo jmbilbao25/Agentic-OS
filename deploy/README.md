@@ -10,8 +10,8 @@ laptop is shut. Nothing here authors memory; writing is still `bin/os`.
 |---|---|
 | Host | EC2 `t3.micro`, 30 GB gp3, Amazon Linux 2023 |
 | Cost | ~$10/month (≈$7.60 compute + ≈$2.40 disk) |
-| TLS | Tailscale Funnel — real certificate, stable hostname, **no domain purchase** |
-| Inbound ports | **22 only**, from your IP. The web app is never publicly bound. |
+| TLS | Caddy + Let's Encrypt on `<dashed-ip>.sslip.io` — real certificate, **no domain purchase**, fully automatic |
+| Inbound ports | 22, 80, 443. The app itself binds to `127.0.0.1` only — Caddy is the sole public listener. |
 | Auth | single username + password, PBKDF2 hashed, per-IP lockout |
 | Routines | `systemd` timer: `git pull` + incremental reindex every 15 min |
 | Recovery | `systemd` restarts on crash and on reboot |
@@ -29,10 +29,9 @@ ssh -i agentos-key.pem ec2-user@<ip> 'bash provision.sh'
 
 `provision.sh` is idempotent — re-run it after any `git pull`.
 
-Then finish the three things a script cannot do for you: `tailscale up` +
-`tailscale funnel --bg 8000`, and set a password with
-`python -m server.tools.setpass`. The script prints the exact steps when it
-finishes.
+`provision.sh` does the TLS too: it derives `<dashed-ip>.sslip.io`, installs
+Caddy, and waits for Let's Encrypt to issue. The only thing left for you is the
+password (`python -m server.tools.setpass`) and an inference key in `server/.env`.
 
 ## Why these choices
 
@@ -42,10 +41,14 @@ instance that could costs roughly ten times as much and still answers worse than
 free-tier hosted model. So embeddings are local and inference is remote behind one
 env var — see `brain/wiki/Model Access Is Not Transferable.md`.
 
-**Why Tailscale Funnel over Caddy + a domain?** Funnel gives a real Let's Encrypt
-certificate on a stable `*.ts.net` hostname without buying a domain and without
-opening 443 to the internet. If you would rather own the hostname, the DuckDNS
-alternative is below — the app is identical either way.
+**Why `sslip.io`?** It resolves `13-218-239-165.sslip.io` to `13.218.239.165`
+with no DNS account, no token, and no interactive login, and Let's Encrypt issues
+for it over HTTP-01. That is a genuinely trusted certificate for zero setup —
+verified end to end here (`ssl_verify_result=0`). Point your own domain at the box
+and re-run with `AGENTOS_PUBLIC_HOST=` when you have one; nothing else changes.
+
+Tailscale Funnel is still supported (`TLS=tailscale`) and is the better choice if
+you would rather not open 80/443 at all — it just needs an interactive login.
 
 **Why SQLite and not Postgres?** No daemon, no second process competing for 1 GB,
 and the index is one file you can delete as a repair step. See

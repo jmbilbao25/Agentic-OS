@@ -89,12 +89,62 @@ else
   say "app did NOT come up — journalctl -u agentos -n 40 --no-pager"
 fi
 
-# ---------------------------------------------------------------- 8. tailscale
-if ! command -v tailscale >/dev/null; then
+# ---------------------------------------------------------------- 8. TLS
+# Real certificate, no domain purchase, no interactive login: <dashed-ip>.sslip.io
+# resolves to this host, and Let's Encrypt will issue for it over HTTP-01.
+# Requires ports 80 and 443 open in the security group.
+if [ "${TLS:-caddy}" = "caddy" ]; then
+  IP="$(curl -fsS --max-time 5 https://checkip.amazonaws.com | tr -d '\n' || true)"
+  HOST="${AGENTOS_PUBLIC_HOST:-${IP//./-}.sslip.io}"
+
+  if [ -z "$IP" ]; then
+    say "could not determine the public IP — skipping TLS. Set AGENTOS_PUBLIC_HOST and re-run."
+  else
+    say "TLS for https://$HOST"
+    if ! command -v caddy >/dev/null; then
+      sudo dnf -y -q install 'dnf-command(copr)' >/dev/null 2>&1 || true
+      sudo dnf -y -q copr enable @caddy/caddy epel-9-x86_64 >/dev/null 2>&1 || true
+      sudo dnf -y -q install caddy >/dev/null 2>&1 || true
+    fi
+    if command -v caddy >/dev/null; then
+      sed -e "s|__HOST__|$HOST|g" -e "s|__EMAIL__|admin@$HOST|g" \
+        deploy/Caddyfile | sudo tee /etc/caddy/Caddyfile >/dev/null
+      sudo caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
+        && say "Caddyfile valid" || say "Caddyfile INVALID — check it before trusting TLS"
+      sudo systemctl enable -q --now caddy
+      sudo systemctl restart caddy
+
+      say "waiting for certificate issuance (needs :80 and :443 open)"
+      for _ in $(seq 1 45); do
+        L=$(sudo journalctl -u caddy --since '-4min' --no-pager 2>/dev/null || true)
+        case "$L" in
+          *"certificate obtained successfully"*) say "certificate obtained"; break ;;
+          *"could not get certificate"*|*"too many failed"*)
+            say "issuance FAILED — is :80 open? journalctl -u caddy"; break ;;
+        esac
+        sleep 3
+      done
+
+      sed -i "s|^AGENTOS_BASE_URL=.*|AGENTOS_BASE_URL=https://$HOST|" server/.env
+      sudo systemctl restart agentos
+      sleep 4
+      if curl -fsS --max-time 10 "https://$HOST/healthz" >/dev/null 2>&1; then
+        say "HTTPS live: https://$HOST"
+      else
+        say "HTTPS not answering yet — journalctl -u caddy -n 30"
+      fi
+    else
+      say "Caddy unavailable — the app is still loopback-only, so nothing is exposed."
+    fi
+  fi
+fi
+
+# Tailscale remains an alternative to Caddy: set TLS=tailscale to skip the above.
+if [ "${TLS:-caddy}" = "tailscale" ] && ! command -v tailscale >/dev/null; then
   say "installing Tailscale"
   sudo dnf -y -q config-manager --add-repo \
     https://pkgs.tailscale.com/stable/amazon-linux/2/tailscale.repo 2>/dev/null || true
-  sudo dnf -y -q install tailscale || say "install Tailscale manually: https://tailscale.com/download/linux"
+  sudo dnf -y -q install tailscale || say "install manually: https://tailscale.com/download/linux"
   sudo systemctl enable -q --now tailscaled || true
 fi
 
@@ -114,19 +164,17 @@ Remaining steps.
 
      OPENROUTER_API_KEY=sk-or-...        # free tier: openrouter.ai/keys
 
-3. Publish over real HTTPS. Do NOT skip this — the password is sent on every
-   request, and over plain HTTP it travels in the clear:
+3. HTTPS is already set up by this script via Caddy + Let's Encrypt on
+   <dashed-ip>.sslip.io. Verify it:
 
-     sudo tailscale up
-     sudo tailscale funnel --bg 8000
-     tailscale funnel status             # note the https://<host>.ts.net URL
+     curl -fsS https://$(curl -fsS https://checkip.amazonaws.com | tr . -).sslip.io/healthz
 
-   Then set AGENTOS_BASE_URL=https://<host>.ts.net in server/.env
+   If you later get your own domain, point it at this host and re-run with:
+     AGENTOS_PUBLIC_HOST=notes.example.com bash deploy/provision.sh
 
-4. Restart and verify:
+4. Restart after any .env edit:
 
      sudo systemctl restart agentos
-     curl -fsS https://<host>.ts.net/healthz
 
    Then sign in. Confirm a WRONG password is rejected and that repeated
    failures lock you out — that negative test is what proves auth works.

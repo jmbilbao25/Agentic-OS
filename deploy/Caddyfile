@@ -1,0 +1,37 @@
+# Caddy reverse proxy for AgentOS. __HOST__ is substituted by provision.sh.
+#
+# Why this exists: the app binds to 127.0.0.1 and never to a public interface. A
+# password is sent on every request, so it must never cross the network in the
+# clear. Caddy terminates TLS and forwards to loopback.
+#
+# The default hostname is <dashed-public-ip>.sslip.io, which resolves to the
+# instance with no DNS setup and no domain purchase, and for which Let's Encrypt
+# will issue a real certificate over the HTTP-01 challenge. Swap in your own
+# hostname whenever you have one — nothing else changes.
+
+{
+	email __EMAIL__
+}
+
+__HOST__ {
+	encode zstd gzip
+
+	reverse_proxy 127.0.0.1:8000 {
+		# The app trusts X-Forwarded-For only from 127.0.0.1 (see the uvicorn
+		# --forwarded-allow-ips flag), so the per-IP login lockout throttles the
+		# real client rather than counting every attempt as coming from Caddy.
+		header_up X-Forwarded-For {remote_host}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		-Server
+	}
+
+	# Deliberately no `log { output file ... }`: the packaged unit runs Caddy
+	# under a systemd sandbox that cannot write /var/log/caddy, and a config that
+	# fails to load is worse than logs in journald. Use `journalctl -u caddy`.
+}

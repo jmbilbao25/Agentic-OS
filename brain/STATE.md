@@ -34,13 +34,14 @@ Promote by rewriting, never by moving. Supporting: `STATE.md`, `lessons.md`,
   disposable; markdown is truth. See [[Grep Beats Embeddings Here]].
 - Embeddings: quantised MiniLM, CPU-only, on-box. Inference: remote,
   OpenAI-compatible, currently OpenRouter free tier.
-- Auth: Google OAuth, single-account allowlist. TLS via Tailscale Funnel.
+- Auth: single username + password (PBKDF2, per-IP lockout). TLS via Tailscale Funnel.
 - Why a server at all: [[Local Runtime Closes The Gaps]].
 
 ## Blocked on the user
-- Create the Google OAuth client (console → credentials) and paste ID + secret
-  into `server/.env`. Nothing else can gate the UI until then.
-- Run `deploy/launch-ec2.sh` from CloudShell, then `deploy/provision.sh` on the box.
+- Add `OPENROUTER_API_KEY` to `server/.env` (openrouter.ai/keys, free tier).
+- Publish over HTTPS: `tailscale up && tailscale funnel --bg 8000`. The password
+  travels in the clear until this is done.
+- Rotate the EC2 keypair — the private key was pasted into a chat transcript.
 - Install `config/kernel-global.md` at the harness's global scope so repo-less
   sessions still boot.
 

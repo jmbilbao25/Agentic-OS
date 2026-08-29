@@ -14,7 +14,7 @@ embed.py      local CPU embeddings, lazily loaded and allowed to be absent
 index.py      build the SQLite index (FTS5 + sqlite-vec)
 search.py     hybrid retrieval, fused with weighted RRF
 llm.py        OpenAI-compatible inference — provider is one env var
-auth.py       Google OAuth with a single-account allowlist
+auth.py       single-user password login, PBKDF2 + per-IP lockout
 app.py        routes
 static/       the UI: orbit.js (canvas map), md.js (renderer), app.js (wiring)
 tools/        eval_retrieval.py (score retrieval), devserve.sh
@@ -78,11 +78,16 @@ works and Ask returns an explicit message instead of a dead spinner.
 
 ## Security
 
-- Google OAuth; the allowlist is checked against Google's **verified** email on
-  every request, so revoking access takes effect immediately rather than whenever
-  a cookie happens to expire.
-- An **empty** `ALLOWED_EMAILS` denies everyone. Failing closed is deliberate.
-- Unverified Google emails are rejected.
+- One username and one password. The password is stored as a **PBKDF2-SHA256**
+  hash (200k iterations, stdlib — no bcrypt dependency) and compared with
+  `hmac.compare_digest`, so a failure leaks no timing signal.
+- **An unset password denies everyone.** Failing closed is deliberate.
+- **Per-IP lockout** (8 attempts, then 15 minutes). A bare password on the public
+  internet needs this; OAuth used to provide it for free.
+- Sessions are bound to a fingerprint of the current credential, so **changing the
+  password invalidates every existing session** without needing a session store.
+- Set or rotate it with `python -m server.tools.setpass`; that is the entire
+  user-management surface.
 - Only `/healthz` is public, and it leaks nothing about the vault.
 - The app binds to loopback; TLS terminates in front of it.
 - All markdown is HTML-escaped before any tag is generated. The vault is trusted,

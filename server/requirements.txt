@@ -5,9 +5,9 @@ itsdangerous==2.2.0
 python-dotenv==1.0.1
 httpx==0.28.1
 
-# Auth
-authlib==1.4.0
+# Auth — password hashing is stdlib (hashlib.pbkdf2_hmac), no bcrypt/authlib
 starlette>=0.41
+python-multipart==0.0.20   # login form parsing
 
 # Semantic search — optional but recommended.
 # Without these the app runs keyword-only (SQLite FTS5 + BM25), which is a

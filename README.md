@@ -114,13 +114,14 @@ markdown and thrown away whenever you like.
 
 ```bash
 cd server
-cp .env.example .env      # add Google OAuth + OPENROUTER_API_KEY
+cp .env.example .env      # then: python -m server.tools.setpass
 pip install -r requirements.txt
 python -m server.index    # build the index
 uvicorn server.app:app --port 8000
 ```
 
-Auth is Google OAuth with a single-account allowlist. See `server/README.md`.
+Auth is a single username + password (PBKDF2, per-IP lockout). Set it with
+`python -m server.tools.setpass`. See `server/README.md`.
 
 ## Always-on
 

@@ -3,9 +3,10 @@
 #
 #   bash provision.sh
 #
-# Installs: swap, python + venv, the app, systemd units, Tailscale. Does NOT
-# start serving publicly until you run `tailscale up` and `tailscale funnel`,
-# because the app must not be reachable before OAuth is configured.
+# Installs: swap, python + venv, the app, systemd units, Tailscale. Binds to
+# loopback only and sets no password, so a freshly provisioned box admits nobody
+# until you run setpass — an app that ships reachable-and-open is worse than one
+# that ships closed.
 set -euo pipefail
 
 REPO="${REPO:-https://github.com/jmbilbao25/Agentic-OS.git}"
@@ -100,39 +101,39 @@ fi
 cat <<'EOF'
 
 ──────────────────────────────────────────────────────────────────────────
-Remaining steps — these need your accounts, so they cannot be scripted.
+Remaining steps.
 
-1. Join your tailnet and publish over HTTPS:
+1. Set the login password (required — until you do, the app admits nobody):
+
+     cd ~/Agentic-OS
+     .venv/bin/python -m server.tools.setpass
+     # or, to have one invented for you:
+     .venv/bin/python -m server.tools.setpass --generate
+
+2. Add your inference key to ~/Agentic-OS/server/.env :
+
+     OPENROUTER_API_KEY=sk-or-...        # free tier: openrouter.ai/keys
+
+3. Publish over real HTTPS. Do NOT skip this — the password is sent on every
+   request, and over plain HTTP it travels in the clear:
 
      sudo tailscale up
-     tailscale funnel --bg 8000
-     tailscale funnel status        # note the https://<host>.ts.net URL
+     sudo tailscale funnel --bg 8000
+     tailscale funnel status             # note the https://<host>.ts.net URL
 
-   Funnel gives you a real Let's Encrypt certificate on a stable hostname
-   with no domain purchase and no inbound port open in the security group.
-
-2. Create the Google OAuth client:
-     console.cloud.google.com -> APIs & Services -> Credentials
-     -> Create credentials -> OAuth client ID -> Web application
-     Authorised redirect URI:  https://<host>.ts.net/auth/callback
-
-3. Put the values in ~/Agentic-OS/server/.env :
-     GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
-     AGENTOS_BASE_URL=https://<host>.ts.net
-     OAUTH_REDIRECT_URI=https://<host>.ts.net/auth/callback
-     ALLOWED_EMAILS=you@gmail.com
-     OPENROUTER_API_KEY=sk-or-...            (openrouter.ai/keys)
+   Then set AGENTOS_BASE_URL=https://<host>.ts.net in server/.env
 
 4. Restart and verify:
+
      sudo systemctl restart agentos
      curl -fsS https://<host>.ts.net/healthz
 
-   Then sign in — and confirm a DIFFERENT Google account gets a 403. That
-   negative test is the one that actually proves the allowlist works.
+   Then sign in. Confirm a WRONG password is rejected and that repeated
+   failures lock you out — that negative test is what proves auth works.
 
 Useful:
-  journalctl -u agentos -f            # app logs
+  journalctl -u agentos -f            # app logs, including failed logins
   systemctl list-timers agentos-sync  # when the next pull+reindex runs
-  ~/Agentic-OS/.venv/bin/python -m server.tools.eval_retrieval
+  .venv/bin/python -m server.tools.eval_retrieval
 ──────────────────────────────────────────────────────────────────────────
 EOF

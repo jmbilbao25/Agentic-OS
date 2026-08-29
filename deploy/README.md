@@ -12,7 +12,7 @@ laptop is shut. Nothing here authors memory; writing is still `bin/os`.
 | Cost | ~$10/month (≈$7.60 compute + ≈$2.40 disk) |
 | TLS | Tailscale Funnel — real certificate, stable hostname, **no domain purchase** |
 | Inbound ports | **22 only**, from your IP. The web app is never publicly bound. |
-| Auth | Google OAuth, single-email allowlist |
+| Auth | single username + password, PBKDF2 hashed, per-IP lockout |
 | Routines | `systemd` timer: `git pull` + incremental reindex every 15 min |
 | Recovery | `systemd` restarts on crash and on reboot |
 
@@ -30,8 +30,8 @@ ssh -i agentos-key.pem ec2-user@<ip> 'bash provision.sh'
 `provision.sh` is idempotent — re-run it after any `git pull`.
 
 Then finish the three things a script cannot do for you: `tailscale up` +
-`tailscale funnel --bg 8000`, create the Google OAuth client, and paste the
-credentials into `server/.env`. The script prints the exact steps when it
+`tailscale funnel --bg 8000`, and set a password with
+`python -m server.tools.setpass`. The script prints the exact steps when it
 finishes.
 
 ## Why these choices
@@ -51,9 +51,10 @@ alternative is below — the app is identical either way.
 and the index is one file you can delete as a repair step. See
 `brain/wiki/Grep Beats Embeddings Here.md`.
 
-**Why loopback-only binding?** An OAuth app with an allowlist, served over plain
-HTTP on a public IP, is decorated rather than protected. Funnel terminates TLS and
-forwards to `127.0.0.1`, so there is no unencrypted public surface at any point.
+**Why loopback-only binding?** A password sent over plain HTTP is sent in the
+clear on every single request — that is not protected, it is decorated. Funnel
+terminates TLS and forwards to `127.0.0.1`, so there is no unencrypted public
+surface at any point. This matters more with a password than it did with OAuth.
 
 ## Operating it
 
@@ -94,18 +95,18 @@ your-name.duckdns.org {
 ```
 
 DNS-01 means you never expose port 80 for the challenge. Set
-`AGENTOS_BASE_URL` and `OAUTH_REDIRECT_URI` to the DuckDNS hostname and restart.
+`AGENTOS_BASE_URL` to the DuckDNS hostname and restart.
 
 Free options that do **not** work here: Freenom is defunct; `nip.io` and
-`sslip.io` hit Let's Encrypt rate limits and are unreliable as OAuth redirect
-targets.
+`sslip.io` hit Let's Encrypt rate limits.
 
 ## Troubleshooting
 
 | Symptom | Cause |
 |---|---|
-| `redirect_uri_mismatch` on sign-in | `OAUTH_REDIRECT_URI` must equal the Google console entry **exactly**, including scheme and no trailing slash |
-| 403 after a successful Google login | your address is not in `ALLOWED_EMAILS`. Working as designed |
+| Login page says no password is set | run `python -m server.tools.setpass`, then restart |
+| 429 / "too many attempts" | per-IP lockout: 8 tries, 15 min. Restart the service to clear it |
+| Logged out after changing the password | by design — sessions are bound to the credential |
 | Signed out after every restart | `SESSION_SECRET` is empty in `server/.env` |
 | Status pill says `keyword`, not `hybrid` | `sqlite-vec` or `fastembed` missing: `.venv/bin/pip install -r server/requirements.txt`, then reindex |
 | Reindex killed | swap missing. Re-run `provision.sh`, or `--full` less often |

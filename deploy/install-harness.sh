@@ -234,6 +234,22 @@ if ! command -v pnpm >/dev/null 2>&1; then
 fi
 command -v pnpm >/dev/null 2>&1 && say "pnpm $(pnpm -v) available for \`dsh plugin\`"
 
+# A C++ compiler, because plugin installs are not all pure JavaScript.
+#
+# Anything offering a terminal pulls node-pty, a native addon. When its prebuilt
+# binary does not match, npm falls back to `node-gyp rebuild`, which needs g++.
+# provision.sh installs `gcc` but not `gcc-c++`, so C compiled and C++ did not, and
+# an install from the plugin market died with
+#   ELIFECYCLE  node-pty install: `node scripts/prebuild.js || node-gyp rebuild`
+#   make: g++: No such file or directory
+# which names neither the missing package nor the reason.
+if ! command -v g++ >/dev/null 2>&1; then
+  say "installing gcc-c++ (native plugin modules such as node-pty need it)"
+  sudo dnf install -y -q gcc-c++ >/dev/null 2>&1 \
+    || warn "could not install gcc-c++; plugins with native modules will fail to build"
+fi
+command -v g++ >/dev/null 2>&1 && say "g++ $(g++ -dumpversion) available for native plugin builds"
+
 # ------------------------------------------------------- 7. optional HTTPS
 if [ "$PUBLISH_HARNESS" = "1" ]; then
   command -v caddy >/dev/null || die "caddy is not installed; run deploy/provision.sh first"

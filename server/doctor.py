@@ -127,17 +127,27 @@ def link_targets() -> List[str]:
 
 
 def promoted_from(stem: str) -> List[str]:
-    """Notes already promoted from this capture, found by its provenance line."""
+    """Notes already promoted from this capture, found by its provenance line.
+
+    Reads the whole note, not a prefix. It used to read the first 600 characters,
+    on the assumption that provenance lives in frontmatter — but `authoring`'s
+    template only emits `source:` for the `raw` layer, so a wiki note never gets
+    one and the marker is the "Distilled from" line at the foot of a 60-200 word
+    body, comfortably past 600 characters. The prefix scan therefore matched
+    nothing, every capture stayed pending forever, and the doctor re-promoted the
+    same captures on every run. These files are small and there are tens of them;
+    reading them whole costs nothing worth optimising.
+    """
     hits = []
     d = config.VAULT / "wiki"
     if not d.is_dir():
         return hits
     for p in sorted(d.glob("*.md")):
         try:
-            head = p.read_text(encoding="utf-8", errors="replace")[:600]
+            text = p.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        if stem in head:
+        if stem in text:
             hits.append(p.stem)
     return hits
 
@@ -234,22 +244,44 @@ def resolve_links(body: str, allowed: List[str]) -> Tuple[str, List[str], List[s
 
 # --------------------------------------------------------------------- run
 
-async def _promote(capture: Path, targets: List[str]) -> Dict:
-    """One capture -> zero or more wiki notes."""
+async def _promote(capture: Path, targets: List[str], n: int, of: int):
+    """One capture -> zero or more wiki notes, narrating as it goes.
+
+    An async generator rather than a function returning a summary, because this is
+    the slowest and least legible thing the OS does — a model reading a fetched
+    page and writing to memory — and a panel that shows only the total afterwards
+    gives you no way to tell a working run from a stuck one. Every decision it
+    makes is emitted as it is made. The last event is always `capture_done`.
+    """
+    yield {"type": "capture", "n": n, "of": of, "capture": capture.name}
+
     try:
         text = capture.read_text(encoding="utf-8", errors="replace")
     except OSError as e:
-        return {"capture": capture.name, "ok": False, "error": str(e), "written": []}
+        yield {"type": "capture_done", "capture": capture.name, "ok": False,
+               "error": str(e), "written": [], "skipped": [], "orphans": []}
+        return
+
+    yield {"type": "thinking", "capture": capture.name,
+           "chars": min(len(text), MAX_CAPTURE_CHARS),
+           "targets": len(targets)}
 
     res = await llm.complete(_prompt(capture, text, targets), temperature=0.2)
     if res.get("error"):
-        return {"capture": capture.name, "ok": False, "error": res["error"],
-                "written": []}
+        yield {"type": "capture_done", "capture": capture.name, "ok": False,
+               "error": res["error"], "written": [], "skipped": [], "orphans": []}
+        return
 
     proposals = _parse_notes(res.get("text") or "")
+    yield {"type": "proposed", "capture": capture.name,
+           "model": res.get("model"), "count": len(proposals),
+           "titles": [p["title"] for p in proposals]}
+
     if not proposals:
-        return {"capture": capture.name, "ok": True, "written": [], "skipped": [],
-                "note": "nothing durable found", "model": res.get("model")}
+        yield {"type": "capture_done", "capture": capture.name, "ok": True,
+               "written": [], "skipped": [], "orphans": [],
+               "note": "nothing durable found", "model": res.get("model")}
+        return
 
     existing = {t.lower() for t in targets}
     written, skipped, orphans = [], [], []
@@ -257,13 +289,20 @@ async def _promote(capture: Path, targets: List[str]) -> Dict:
     for p in proposals:
         if p["title"].lower() in existing:
             skipped.append(p["title"])
+            yield {"type": "skipped", "title": p["title"],
+                   "why": "the vault already has a note with this title"}
             continue
+
         # Links may also point at notes created earlier in this same run.
         body, kept, dropped = resolve_links(p["body"], targets)
+        if dropped:
+            yield {"type": "links_dropped", "title": p["title"], "dropped": dropped}
         if not kept:
-            # An unlinked note is an orphan. Report it rather than filing it.
             orphans.append(p["title"])
+            yield {"type": "orphan", "title": p["title"],
+                   "why": "no link resolved, so it would be unreachable"}
             continue
+
         body = "%s\n\nDistilled from `%s` by the doctor. Review before relying on it." % (
             body.strip(), capture.name)
         try:
@@ -272,40 +311,56 @@ async def _promote(capture: Path, targets: List[str]) -> Dict:
                 source=capture.name, tags=list(DOCTOR_TAGS))
         except authoring.WriteRefused as e:
             skipped.append("%s (refused: %s)" % (p["title"], e))
+            yield {"type": "skipped", "title": p["title"], "why": str(e)}
             continue
+
         written.append({"title": p["title"], "id": out.get("id"),
                         "path": out.get("path"), "links": kept,
                         "dropped_links": dropped})
+        yield {"type": "note", "title": p["title"], "id": out.get("id"),
+               "path": out.get("path"), "links": kept, "dropped": dropped}
+
         # Newly written notes become valid link targets for the rest of the run.
         targets.append(p["title"])
         existing.add(p["title"].lower())
 
-    return {"capture": capture.name, "ok": True, "written": written,
-            "skipped": skipped, "orphans": orphans, "model": res.get("model")}
+    yield {"type": "capture_done", "capture": capture.name, "ok": True,
+           "written": written, "skipped": skipped, "orphans": orphans,
+           "model": res.get("model")}
 
 
-async def run(limit: Optional[int] = None) -> Dict:
-    """Promote every unpromoted capture. Returns a summary for the panel."""
+async def run(limit: Optional[int] = None):
+    """Promote every unpromoted capture, yielding progress; last event is `done`."""
     if not llm.configured():
-        return {"ok": False, "error":
-                "The doctor needs an inference key — it reads captures and writes "
-                "notes. Set one in Settings, or run `radar` and `distill` alone.",
-                "summary": ""}
+        yield {"type": "done", "ok": False, "written": 0, "captures": 0,
+               "error": "The doctor needs an inference key — it reads captures and "
+                        "writes notes. Set one in Settings, or run `radar` and "
+                        "`distill` alone.",
+               "summary": ""}
+        return
 
     todo = pending()
     if not todo:
         total = len(_captures())
-        return {"ok": True, "captures": 0, "written": 0, "results": [],
-                "summary": "Nothing to promote: all %d capture%s already has notes "
-                           "in brain/wiki/." % (total, "" if total == 1 else "s")}
+        yield {"type": "done", "ok": True, "captures": 0, "written": 0,
+               "summary": "Nothing to promote: all %d capture%s already has notes "
+                          "in brain/wiki/." % (total, "" if total == 1 else "s")}
+        return
 
     cap = limit or MAX_CAPTURES_PER_RUN
+    skipped_for_cap = len(todo) - min(len(todo), cap)
     todo = todo[:cap]
     targets = link_targets()
 
+    yield {"type": "start", "captures": len(todo), "targets": len(targets),
+           "deferred": skipped_for_cap}
+
     results = []
-    for capture in todo:
-        results.append(await _promote(capture, targets))
+    for i, capture in enumerate(todo, 1):
+        async for ev in _promote(capture, targets, i, len(todo)):
+            if ev["type"] == "capture_done":
+                results.append(ev)
+            yield ev
 
     written = sum(len(r.get("written") or []) for r in results)
     failed = [r for r in results if not r.get("ok")]
@@ -320,11 +375,13 @@ async def run(limit: Optional[int] = None) -> Dict:
         bits.append("%d dropped as unlinkable" % orphans)
     if failed:
         bits.append("%d capture%s failed" % (len(failed), "" if len(failed) == 1 else "s"))
+    if skipped_for_cap:
+        bits.append("%d left for the next run" % skipped_for_cap)
 
-    return {"ok": not failed or written > 0, "captures": len(todo),
-            "written": written, "results": results,
-            "error": failed[0].get("error", "") if failed and not written else "",
-            "summary": ", ".join(bits) + "."}
+    yield {"type": "done", "ok": bool(not failed or written), "captures": len(todo),
+           "written": written,
+           "error": failed[0].get("error", "") if failed and not written else "",
+           "summary": ", ".join(bits) + "."}
 
 
 # -------------------------------------------------------------- diagnostics

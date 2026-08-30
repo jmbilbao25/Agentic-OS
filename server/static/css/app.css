@@ -1139,3 +1139,11 @@ body.reduced-motion .skel i { animation: none; }
   margin-left: auto; padding-left: var(--s3); flex: none;
   font-family: var(--mono); font-size: 10px; color: var(--fg-2);
 }
+
+/* Feed lines the doctor emits about its own reasoning. Indented and dimmed so the
+   step machinery stays the outline and the model's decisions read as detail under
+   it — one glance tells you which step you are in, a second tells you why. */
+.act-line.sub { padding-left: var(--s4); font-size: 11.5px; }
+.act-line.sub .act-line-t b { color: var(--fg-1); }
+.act-line.warn .i { color: var(--warn); }
+.act-line.warn .act-line-t span { color: var(--warn); }

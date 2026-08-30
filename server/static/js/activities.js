@@ -1,23 +1,34 @@
-/* The Activities view.
+/* The Activities view, and the live feed.
  *
- * A roster of automations, each one a button. Pressing one streams a frame per
- * step into that activity's own card, so the log stays attached to the thing that
- * produced it rather than accumulating in a shared console — you press two
- * buttons over a morning and you still know which output was which.
+ * A roster of automations, each one a button, and underneath each one a running
+ * account of what it is doing.
  *
- * What a step *writes* is shown before you run it, next to the steps themselves.
- * These recipes append to the vault, and a button whose consequences are only
- * discoverable by pressing it is a button people are right not to trust.
+ * WHY THIS POLLS INSTEAD OF STREAMING
+ * -----------------------------------
+ * It used to hold one SSE response open for the whole run. That works on a laptop
+ * and fails on a phone: the doctor takes ~80 seconds over three captures, the
+ * browser gave up at 50, and the panel reported "network error" for a run the
+ * server went on to finish. Heartbeats did not save it — the connection was still
+ * the single point of failure, and it was also the only thing reporting.
+ *
+ * So the server owns the run and this polls its log from an offset. A dropped
+ * connection costs one poll. A lock screen costs nothing. A page reload rejoins
+ * the run in progress instead of orphaning it, because `load()` asks which run is
+ * live before it draws anything.
+ *
+ * The feed is deliberately verbose for the doctor: it is the one step where the
+ * interesting part is what the model *decided* — which capture, which notes, which
+ * links it had to drop — and a summary printed afterwards gives you no way to tell
+ * a working run from a stuck one.
  */
 
-import { get, stream, AuthLost } from './api.js';
+import { get, post, AuthLost } from './api.js';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-/** Seconds as something readable at a glance. A 15-minute reindex reported as
- *  "912.4s" is a number you have to decode; "15m 12s" is one you can read. */
+/** Seconds as something readable at a glance: "15m 12s" beats "912.4s". */
 const fmt = (sec) => {
   const n = Math.max(0, Math.round(Number(sec) || 0));
   return n < 60 ? `${n}s` : `${Math.floor(n / 60)}m ${String(n % 60).padStart(2, '0')}s`;
@@ -25,6 +36,10 @@ const fmt = (sec) => {
 
 /** Steps that cannot work without an inference key. */
 const NEEDS_LLM = new Set(['distill', 'doctor']);
+
+/** How often to ask for new log lines. Fast enough to feel live, slow enough that
+ *  a forgotten open tab is not a load generator. */
+const POLL_MS = 1500;
 
 export class ActivitiesView {
   constructor({ toast, onOpenDoc, onBusy, onWrote }) {
@@ -35,19 +50,15 @@ export class ActivitiesView {
     this.toast = toast;
     this.onOpenDoc = onOpenDoc || (() => {});
     this.onBusy = onBusy || (() => {});
-    // The map is stale the moment an activity writes a note, so the caller gets
-    // told rather than the user being left with a graph that quietly disagrees
-    // with the vault.
     this.onWrote = onWrote || (() => {});
 
     this.data = null;
-    this.running = null;      // name of the activity currently running
-    this.abort = null;
     this.loaded = false;
+    this.watch = null;          // { runId, name, cursor, timer, wrote }
 
     this.body.addEventListener('click', (e) => {
       const run = e.target.closest('[data-run]');
-      if (run) { this.run(run.dataset.run).catch((err) => this.fail(err)); return; }
+      if (run) { this.start(run.dataset.run).catch((err) => this.fail(err)); return; }
       const open = e.target.closest('[data-doc]');
       if (open) this.onOpenDoc(open.dataset.doc);
     });
@@ -61,17 +72,28 @@ export class ActivitiesView {
   /* --------------------------------------------------------------- loading */
 
   async load({ force = false } = {}) {
-    if (this.loaded && !force) return;
+    if (this.loaded && !force) { this.rejoin().catch(() => {}); return; }
     try {
       this.data = await get('/api/activities');
       this.loaded = true;
       this.render();
+      await this.rejoin();
     } catch (e) {
       this.body.innerHTML = `<div class="failed">
         <svg class="i" aria-hidden="true"><use href="#i-alert"/></svg>
         <b>Could not load activities</b><p>${esc(e.message)}</p></div>`;
       throw e;
     }
+  }
+
+  /** Reattach to a run already in progress. This is what makes a reload safe. */
+  async rejoin() {
+    if (this.watch) return;
+    const { active } = await get('/api/activities/runs');
+    if (!active) return;
+    const head = await get(`/api/activities/runs/${active}`);
+    this.attach(head.run_id, head.name, 0);
+    this.toast(`Rejoined ${head.name} — already running`, 'ok');
   }
 
   /* -------------------------------------------------------------- render */
@@ -97,7 +119,7 @@ export class ActivitiesView {
         <h3>Activities</h3>
         <p>Automations this brain can run. Each one is a file in
         <code>config/activities/</code>, so an agent can write you a new button
-        and it shows up here.</p>
+        and it shows up here. A run keeps going if you close this tab.</p>
       </div>
       ${notices}
       <div class="act-list">
@@ -139,9 +161,6 @@ export class ActivitiesView {
     </article>`;
   }
 
-  /** The step vocabulary, shown because it is also the answer to "what can I ask
-   *  the agent to build?" — and because it is the honest list of what a button
-   *  here is able to do. */
   vocab(steps) {
     const rows = Object.entries(steps).map(([verb, v]) => `<tr>
       <td><code>${esc(verb)}${v.arg ? `: &lt;${esc(v.arg)}&gt;` : ''}</code></td>
@@ -159,133 +178,177 @@ export class ActivitiesView {
 
   /* ------------------------------------------------------------------ run */
 
+  /** Stop *watching*. The run itself continues server-side, on purpose: killing
+   *  work halfway through a git-committing routine is worse than losing sight of
+   *  it, and you can rejoin by reopening the panel. */
   stop() {
-    if (this.abort) {
-      this.abort.abort();
-      this.abort = null;
-      this.toast('Activity stopped');
-    }
+    if (!this.watch) return;
+    const { name } = this.watch;
+    this.detach();
+    this.toast(`Stopped watching ${name} — it is still running on the server`);
   }
 
   setPhase(text) {
-    this.phaseEl.innerHTML = text
-      ? `<span class="spin"></span>${esc(text)}` : '';
+    this.phaseEl.innerHTML = text ? `<span class="spin"></span>${esc(text)}` : '';
   }
 
-  async run(name) {
-    if (this.running) {
-      this.toast(`${this.running} is still running`, 'err');
+  async start(name) {
+    if (this.watch) {
+      this.toast(`${this.watch.name} is still running`, 'err');
       return;
     }
-    const log = document.getElementById(`act-log-${name}`);
-    const btn = this.body.querySelector(`[data-run="${name}"]`);
-    if (!log) return;
-
-    this.running = name;
-    this.abort = new AbortController();
-    this.onBusy(true);
-    if (btn) btn.disabled = true;
-    this.stopBtn.hidden = false;
-    log.hidden = false;
-    log.innerHTML = '';
-
-    let failed = null;
-    let wrote = false;
-
-    try {
-      for await (const { event, data } of stream('/api/activities/run', { name },
-                                                 { signal: this.abort.signal })) {
-        switch (event) {
-          case 'start':
-            this.setPhase(`${name} · ${data.of} step${data.of === 1 ? '' : 's'}`);
-            break;
-          case 'step':
-            this.setPhase(`${name} · step ${data.n}/${data.of} · ${data.summary}`);
-            log.insertAdjacentHTML('beforeend', `<div class="act-line running"
-              id="act-${name}-${data.n}">
-              <span class="spin"></span>
-              <span class="act-line-t"><b>${esc(data.render)}</b>
-              <span>${esc(data.summary)}</span></span></div>`);
-            break;
-
-          /* A heartbeat. Its job on the wire is to stop an idle connection being
-           * dropped mid-run; its job here is to say how long a slow step has been
-           * going, because a spinner with no number is indistinguishable from a
-           * hang and that is when people reload and lose the run. */
-          case 'ping': {
-            if (!data.n && !document.getElementById(`act-${name}-reindex`)) {
-              log.insertAdjacentHTML('beforeend', `<div class="act-line running"
-                id="act-${name}-reindex"><span class="spin"></span>
-                <span class="act-line-t"><b>reindex</b><span>starting</span></span></div>`);
-            }
-            const row = data.n
-              ? document.getElementById(`act-${name}-${data.n}`)
-              : document.getElementById(`act-${name}-reindex`);
-            const el = row?.querySelector('.act-line-t span');
-            if (el) el.textContent = `${data.render || data.verb} — running, ${fmt(data.elapsed)}`;
-            this.setPhase(`${name} · ${data.render || data.verb} · ${fmt(data.elapsed)}`);
-            break;
-          }
-          case 'step_done': {
-            const row = document.getElementById(`act-${name}-${data.n}`);
-            if (row) {
-              // The tail of the output, not the head: a module's last lines are
-              // its result, where its first are startup noise.
-              const detail = ((data.ok ? data.output : data.error) || '')
-                .trim().split('\n').filter(Boolean).slice(-3).join(' ');
-              row.classList.remove('running');
-              row.classList.add(data.ok ? 'ok' : 'bad');
-              row.innerHTML = `<svg class="i" aria-hidden="true"><use href="#${
-                data.ok ? 'i-check' : 'i-alert'}"/></svg>
-                <span class="act-line-t"><b>${esc(data.verb)}</b>
-                <span>${esc(detail.slice(0, 400)) || (data.ok ? 'done' : 'failed')}</span>
-                </span>${data.elapsed ? `<span class="act-el">${fmt(data.elapsed)}</span>` : ''}`;
-            }
-            if (data.ok) wrote = true;
-            break;
-          }
-          case 'reindexed': {
-            const row = document.getElementById(`act-${name}-reindex`);
-            const html = `<svg class="i" aria-hidden="true"><use href="#i-sync"/></svg>
-              <span class="act-line-t"><b>reindexed</b>
-              <span>${data.chunks ?? '?'} chunks across ${data.docs ?? '?'} documents —
-              what it wrote is searchable now</span></span>`;
-            if (row) { row.classList.remove('running'); row.classList.add('ok'); row.innerHTML = html; }
-            else log.insertAdjacentHTML('beforeend', `<div class="act-line ok">${html}</div>`);
-            break;
-          }
-          case 'error': failed = data.message; break;
-          case 'done':
-            log.insertAdjacentHTML('beforeend', `<div class="act-done ${
-              data.ok ? 'ok' : 'bad'}">${esc(data.message)}</div>`);
-            if (data.ok) this.toast(data.message, 'ok');
-            break;
-          default: break;
-        }
-      }
-    } catch (e) {
-      if (e instanceof AuthLost) { this.cleanup(name); throw e; }
-      if (e.name !== 'AbortError') failed = e.message;
-    } finally {
-      // Always. A Stop button left visible claims work is still running, and a
-      // Run button left disabled means the card is dead until a reload.
-      this.cleanup(name);
-    }
-
-    if (failed) {
-      log.insertAdjacentHTML('beforeend', `<div class="act-done bad">${esc(failed)}</div>`);
-      this.toast(failed, 'err');
-    }
-    if (wrote) this.onWrote();
+    const r = await post('/api/activities/run', { name });
+    if (r.already_running) this.toast(`${name} was already running — watching it`);
+    this.attach(r.run_id, name, 0);
   }
 
-  cleanup(name) {
-    this.running = null;
-    this.abort = null;
+  attach(runId, name, cursor) {
+    const log = document.getElementById(`act-log-${name}`);
+    if (log && !cursor) { log.hidden = false; log.innerHTML = ''; }
+    else if (log) log.hidden = false;
+
+    const btn = this.body.querySelector(`[data-run="${name}"]`);
+    if (btn) btn.disabled = true;
+    this.stopBtn.hidden = false;
+    this.onBusy(true);
+
+    this.watch = { runId, name, cursor: cursor || 0, wrote: false, timer: null };
+    this.tick();
+  }
+
+  detach() {
+    if (!this.watch) return;
+    const { name, timer, wrote } = this.watch;
+    if (timer) clearTimeout(timer);
+    this.watch = null;
     this.onBusy(false);
     this.stopBtn.hidden = true;
     this.setPhase('');
     const btn = this.body.querySelector(`[data-run="${name}"]`);
     if (btn) btn.disabled = false;
+    if (wrote) this.onWrote();
+  }
+
+  async tick() {
+    if (!this.watch) return;
+    const { runId, name, cursor } = this.watch;
+    let head;
+    try {
+      head = await get(`/api/activities/runs/${runId}?after=${cursor}`);
+    } catch (e) {
+      if (e instanceof AuthLost) { this.detach(); this.fail(e); return; }
+      // A failed poll is not a failed run. Say so, and try again — this is the
+      // whole point of not streaming.
+      this.setPhase(`${name} · reconnecting…`);
+      this.watch.timer = setTimeout(() => this.tick().catch(() => {}), POLL_MS * 2);
+      return;
+    }
+
+    const log = document.getElementById(`act-log-${name}`);
+    for (const ev of head.events || []) this.line(log, ev);
+    this.watch.cursor = head.next;
+    if ((head.events || []).some((e) => e.type === 'note' || e.type === 'doctor_note'
+                                        || e.type === 'step_done')) {
+      this.watch.wrote = true;
+    }
+
+    if (head.running) {
+      this.setPhase(`${name} · ${fmt(head.elapsed)}`);
+      this.watch.timer = setTimeout(() => this.tick().catch(() => {}), POLL_MS);
+      return;
+    }
+
+    if (head.ok) this.toast(head.message || `${name} finished`, 'ok');
+    else if (head.message) this.toast(head.message, 'err');
+    this.detach();
+  }
+
+  /* ----------------------------------------------------------- the feed */
+
+  line(log, ev) {
+    if (!log) return;
+    const row = (cls, icon, head, detail, right) => {
+      log.insertAdjacentHTML('beforeend', `<div class="act-line ${cls}">
+        ${icon ? `<svg class="i" aria-hidden="true"><use href="#${icon}"/></svg>`
+               : '<span class="spin"></span>'}
+        <span class="act-line-t"><b>${head}</b>${
+          detail ? `<span>${detail}</span>` : ''}</span>${
+          right ? `<span class="act-el">${esc(right)}</span>` : ''}</div>`);
+      log.lastElementChild?.scrollIntoView({ block: 'nearest' });
+    };
+
+    switch (ev.type) {
+      case 'start':
+        row('', 'i-run', esc(ev.name),
+            `${ev.of} step${ev.of === 1 ? '' : 's'}: ${esc((ev.steps || []).join(' → '))}`);
+        break;
+      case 'step':
+        row('running', '', esc(ev.render), esc(ev.summary));
+        break;
+      case 'ping':
+        // Liveness only; the phase line already carries the clock.
+        break;
+      case 'step_done':
+        row(ev.ok ? 'ok' : 'bad', ev.ok ? 'i-check' : 'i-alert', esc(ev.verb),
+            esc(((ev.ok ? ev.output : ev.error) || '').trim().split('\n')
+              .filter(Boolean).slice(-2).join(' ').slice(0, 300)) || (ev.ok ? 'done' : 'failed'),
+            ev.elapsed ? fmt(ev.elapsed) : '');
+        break;
+      case 'reindexed':
+        row('ok', 'i-sync', 'reindexed',
+            `${ev.chunks ?? '?'} chunks across ${ev.docs ?? '?'} documents — searchable now`);
+        break;
+
+      /* ---- the doctor narrating itself ---- */
+      case 'doctor_start':
+        row('', 'i-doc', 'reading captures',
+            `${ev.captures} to promote, ${ev.targets} existing notes to link into${
+              ev.deferred ? `, ${ev.deferred} left for next run` : ''}`);
+        break;
+      case 'doctor_capture':
+        row('sub', 'i-doc', esc(ev.capture), `capture ${ev.n} of ${ev.of}`);
+        break;
+      case 'doctor_thinking':
+        row('sub running', '', 'asking the model',
+            `${ev.chars.toLocaleString()} characters of capture, ${ev.targets} link targets`);
+        break;
+      case 'doctor_proposed':
+        row('sub', 'i-ask', `${ev.count} note${ev.count === 1 ? '' : 's'} proposed`,
+            `${esc(ev.model || '')}${ev.titles?.length ? ` — ${esc(ev.titles.join('; '))}` : ''}`);
+        break;
+      case 'doctor_note':
+        row('sub ok', 'i-check', esc(ev.title),
+            `written · links to ${esc((ev.links || []).join(', ')) || 'nothing'}${
+              ev.dropped?.length ? ` · dropped ${esc(ev.dropped.join(', '))}` : ''}`);
+        break;
+      case 'doctor_links_dropped':
+        row('sub warn', 'i-warn', 'unresolvable links removed',
+            `${esc(ev.title)} → ${esc((ev.dropped || []).join(', '))}`);
+        break;
+      case 'doctor_skipped':
+        row('sub', 'i-empty', esc(ev.title), `skipped — ${esc(ev.why)}`);
+        break;
+      case 'doctor_orphan':
+        row('sub warn', 'i-warn', esc(ev.title), `dropped — ${esc(ev.why)}`);
+        break;
+      case 'doctor_capture_done':
+        row('sub', ev.ok ? 'i-check' : 'i-alert', esc(ev.capture),
+            ev.ok ? `${(ev.written || []).length} written, ${(ev.skipped || []).length} skipped, ${(ev.orphans || []).length} orphaned`
+                  : esc(ev.error || 'failed'));
+        break;
+
+      case 'error':
+        row('bad', 'i-alert', 'stopped', esc(ev.message));
+        break;
+      case 'notice':
+        row('', 'i-doc', 'note', esc(ev.message));
+        break;
+      case 'done':
+        log.insertAdjacentHTML('beforeend',
+          `<div class="act-done ${ev.ok ? 'ok' : 'bad'}">${esc(ev.message || '')}</div>`);
+        break;
+      default:
+        break;
+    }
   }
 }

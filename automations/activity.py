@@ -62,7 +62,27 @@ async def run_one(name: str, quiet: bool = False) -> int:
                 print("        failed: %s" % (ev.get("error") or "").strip()[:400],
                       file=sys.stderr)
         elif kind == "reindexed" and not quiet:
-            print("        reindexed (%s chunks)" % ev.get("chunks"))
+            print("        reindexed (%s chunks, %s docs)"
+                  % (ev.get("chunks"), ev.get("docs")))
+        elif kind.startswith("doctor_") and not quiet:
+            # The doctor narrates itself; mirror that to the terminal so a CLI run
+            # is as legible as the panel rather than silent for 80 seconds.
+            label = kind[len("doctor_"):]
+            bits = {
+                "start": lambda e: "%s capture(s), %s link targets"
+                                   % (e.get("captures"), e.get("targets")),
+                "capture": lambda e: "%s (%s/%s)" % (e.get("capture"), e.get("n"), e.get("of")),
+                "thinking": lambda e: "asking the model about %s chars" % e.get("chars"),
+                "proposed": lambda e: "%s proposed by %s" % (e.get("count"), e.get("model")),
+                "note": lambda e: "wrote %r -> [[%s]]"
+                                  % (e.get("title"), "]] [[".join(e.get("links") or [])),
+                "skipped": lambda e: "skipped %r (%s)" % (e.get("title"), e.get("why")),
+                "orphan": lambda e: "orphan %r (%s)" % (e.get("title"), e.get("why")),
+                "links_dropped": lambda e: "dropped links in %r: %s"
+                                          % (e.get("title"), ", ".join(e.get("dropped") or [])),
+                "capture_done": lambda e: "%s done" % e.get("capture"),
+            }.get(label)
+            print("        %-14s %s" % (label, bits(ev) if bits else ""))
         elif kind == "done":
             ok = ok and bool(ev.get("ok"))
             print(ev.get("message", ""), file=sys.stdout if ok else sys.stderr)

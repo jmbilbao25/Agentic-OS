@@ -1,0 +1,54 @@
+[Unit]
+# Sits between the harness and Gemini, re-attaching the thought_signature that
+# pi-ai's openai-completions path drops. See gemini-shim/shim.py for why this is
+# necessary and README.md for the verification that established it.
+Description=Gemini thought_signature shim for the JM Agentic-OS Harness
+Documentation=https://github.com/jmbilbao25/Agentic-OS
+After=network-online.target
+Wants=network-online.target
+# The harness only needs the shim once a request is made, not at boot, so this is
+# an ordering preference rather than a dependency: a dead shim must degrade the
+# gemini route alone, never block the harness from starting on its other routes.
+Before=jm-harness.service
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user
+
+# Loopback only, and deliberately so. The shim performs no authentication of its
+# own; it forwards whatever Authorization header arrives. Binding it to a public
+# interface would publish an unauthenticated relay to a billed Gemini account.
+Environment=SHIM_HOST=127.0.0.1
+Environment=SHIM_PORT=8787
+
+# No EnvironmentFile on purpose: the shim does NOT get GEMINI_API_KEY. The key
+# stays inside the harness process, where pi-ai's `apiKeyEnv` seam owns it, and
+# reaches Gemini as a forwarded header. A shim holding its own copy would be a
+# second place for the secret to leak from for no operational gain.
+
+ExecStart=/usr/bin/python3 /home/ec2-user/Agentic-OS/deploy/harness/gemini-shim/shim.py
+
+Restart=always
+RestartSec=3
+
+# Stdlib-only HTTP server on a t3.micro that is already running the harness under
+# a 340M cap. This is generous for what it does and bounds the blast radius of a
+# leak in the signature cache.
+MemoryMax=128M
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/home/ec2-user/Agentic-OS
+InaccessiblePaths=-/home/ec2-user/.ssh -/home/ec2-user/Agentic-OS/server/.env -/home/ec2-user/Agentic-OS/deploy/harness/harness.env
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

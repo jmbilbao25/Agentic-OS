@@ -1132,3 +1132,10 @@ body.auth {
 }
 body.reduced-motion .auth-mark,
 body.reduced-motion .skel i { animation: none; }
+
+/* Elapsed time on a finished step. Right-aligned so the eye can scan durations
+   down the column rather than hunting for them inside each line of prose. */
+.act-el {
+  margin-left: auto; padding-left: var(--s3); flex: none;
+  font-family: var(--mono); font-size: 10px; color: var(--fg-2);
+}

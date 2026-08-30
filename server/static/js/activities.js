@@ -16,6 +16,13 @@ const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+/** Seconds as something readable at a glance. A 15-minute reindex reported as
+ *  "912.4s" is a number you have to decode; "15m 12s" is one you can read. */
+const fmt = (sec) => {
+  const n = Math.max(0, Math.round(Number(sec) || 0));
+  return n < 60 ? `${n}s` : `${Math.floor(n / 60)}m ${String(n % 60).padStart(2, '0')}s`;
+};
+
 /** Steps that cannot work without an inference key. */
 const NEEDS_LLM = new Set(['distill', 'doctor']);
 
@@ -200,6 +207,25 @@ export class ActivitiesView {
               <span class="act-line-t"><b>${esc(data.render)}</b>
               <span>${esc(data.summary)}</span></span></div>`);
             break;
+
+          /* A heartbeat. Its job on the wire is to stop an idle connection being
+           * dropped mid-run; its job here is to say how long a slow step has been
+           * going, because a spinner with no number is indistinguishable from a
+           * hang and that is when people reload and lose the run. */
+          case 'ping': {
+            if (!data.n && !document.getElementById(`act-${name}-reindex`)) {
+              log.insertAdjacentHTML('beforeend', `<div class="act-line running"
+                id="act-${name}-reindex"><span class="spin"></span>
+                <span class="act-line-t"><b>reindex</b><span>starting</span></span></div>`);
+            }
+            const row = data.n
+              ? document.getElementById(`act-${name}-${data.n}`)
+              : document.getElementById(`act-${name}-reindex`);
+            const el = row?.querySelector('.act-line-t span');
+            if (el) el.textContent = `${data.render || data.verb} — running, ${fmt(data.elapsed)}`;
+            this.setPhase(`${name} · ${data.render || data.verb} · ${fmt(data.elapsed)}`);
+            break;
+          }
           case 'step_done': {
             const row = document.getElementById(`act-${name}-${data.n}`);
             if (row) {
@@ -213,18 +239,21 @@ export class ActivitiesView {
                 data.ok ? 'i-check' : 'i-alert'}"/></svg>
                 <span class="act-line-t"><b>${esc(data.verb)}</b>
                 <span>${esc(detail.slice(0, 400)) || (data.ok ? 'done' : 'failed')}</span>
-                </span>`;
+                </span>${data.elapsed ? `<span class="act-el">${fmt(data.elapsed)}</span>` : ''}`;
             }
             if (data.ok) wrote = true;
             break;
           }
-          case 'reindexed':
-            log.insertAdjacentHTML('beforeend', `<div class="act-line ok">
-              <svg class="i" aria-hidden="true"><use href="#i-sync"/></svg>
+          case 'reindexed': {
+            const row = document.getElementById(`act-${name}-reindex`);
+            const html = `<svg class="i" aria-hidden="true"><use href="#i-sync"/></svg>
               <span class="act-line-t"><b>reindexed</b>
-              <span>${data.chunks ?? '?'} chunks — what it wrote is searchable now</span>
-              </span></div>`);
+              <span>${data.chunks ?? '?'} chunks across ${data.docs ?? '?'} documents —
+              what it wrote is searchable now</span></span>`;
+            if (row) { row.classList.remove('running'); row.classList.add('ok'); row.innerHTML = html; }
+            else log.insertAdjacentHTML('beforeend', `<div class="act-line ok">${html}</div>`);
             break;
+          }
           case 'error': failed = data.message; break;
           case 'done':
             log.insertAdjacentHTML('beforeend', `<div class="act-done ${
@@ -237,6 +266,10 @@ export class ActivitiesView {
     } catch (e) {
       if (e instanceof AuthLost) { this.cleanup(name); throw e; }
       if (e.name !== 'AbortError') failed = e.message;
+    } finally {
+      // Always. A Stop button left visible claims work is still running, and a
+      // Run button left disabled means the card is dead until a reload.
+      this.cleanup(name);
     }
 
     if (failed) {
@@ -244,7 +277,6 @@ export class ActivitiesView {
       this.toast(failed, 'err');
     }
     if (wrote) this.onWrote();
-    this.cleanup(name);
   }
 
   cleanup(name) {

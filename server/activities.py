@@ -47,6 +47,7 @@ import asyncio
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncGenerator, Dict, List, Optional
@@ -120,6 +121,22 @@ STEPS: Dict[str, Verb] = {
 
 #: Steps after which the index is stale and a search would miss what just landed.
 _REINDEX_AFTER = {"radar", "research", "distill", "doctor"}
+
+#: How often to send a keepalive while a step is still working.
+#:
+#: Not decoration. A step here is genuinely slow — embedding 35 changed documents
+#: on a t3.micro's CPU measured 15 minutes — and a stream that says nothing for
+#: that long is dropped by something in the path (a mobile carrier's NAT, a proxy's
+#: idle timeout, the browser), which surfaces to the user as "network error" on a
+#: run that in fact succeeded. Every long await is now interleaved with a ping
+#: carrying elapsed seconds, so the connection stays warm *and* the panel can say
+#: how long it has been going instead of looking hung.
+HEARTBEAT_SECONDS = 10.0
+
+#: Sentinel event: carries a finished step's result back out of the ping loop.
+#: An async generator cannot both yield progress and return a value, so the result
+#: travels as one more event and `run()` unwraps it rather than re-yielding it.
+_RESULT = "_result"
 
 
 @dataclass
@@ -376,6 +393,38 @@ async def _run_step(step: Step) -> Dict:
             "error": "" if ok else (p.stderr or p.stdout or "")[-2000:]}
 
 
+async def _awaiting(coro, ping: Dict) -> AsyncGenerator[Dict, None]:
+    """Await `coro`, emitting `ping` every HEARTBEAT_SECONDS until it finishes.
+
+    Yields zero or more ping events, then exactly one `_RESULT` event. An
+    unexpected exception becomes a failed-step result rather than escaping: a step
+    that blows up should end the activity with a message, not by killing the stream
+    the panel is reading, because a dead stream is indistinguishable from a dead
+    network and sends the user looking in the wrong place.
+    """
+    task = asyncio.ensure_future(coro)
+    t0 = time.monotonic()
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=HEARTBEAT_SECONDS)
+            if done:
+                break
+            out = dict(ping)
+            out["elapsed"] = round(time.monotonic() - t0, 1)
+            yield out
+    except asyncio.CancelledError:
+        # The client closed the tab. Do not leave the work running unobserved.
+        task.cancel()
+        raise
+    try:
+        result = task.result()
+    except Exception as e:                                  # noqa: BLE001
+        result = {"ok": False, "output": "",
+                  "error": "%s: %s" % (type(e).__name__, e)}
+    yield {"type": _RESULT, "result": result,
+           "elapsed": round(time.monotonic() - t0, 1)}
+
+
 async def run(name: str) -> AsyncGenerator[Dict, None]:
     """Execute an activity, yielding one event per step.
 
@@ -393,9 +442,21 @@ async def run(name: str) -> AsyncGenerator[Dict, None]:
         yield {"type": "step", "n": i, "of": len(a.steps), "verb": step.verb,
                "arg": step.arg, "render": step.render(), "summary": spec.summary,
                "writes": spec.writes}
-        res = await _run_step(step)
+
+        res = {"ok": False, "error": "the step produced no result"}
+        elapsed = 0.0
+        async for ev in _awaiting(_run_step(step),
+                                  {"type": "ping", "n": i, "of": len(a.steps),
+                                   "verb": step.verb, "render": step.render()}):
+            if ev["type"] == _RESULT:
+                res = ev["result"]
+                elapsed = ev["elapsed"]
+            else:
+                yield ev
+
         yield {"type": "step_done", "n": i, "verb": step.verb, "ok": res.get("ok"),
-               "output": res.get("output", ""), "error": res.get("error", "")}
+               "output": res.get("output", ""), "error": res.get("error", ""),
+               "elapsed": elapsed}
         if not res.get("ok"):
             yield {"type": "done", "ok": False, "ran": i, "of": len(a.steps),
                    "message": "%s failed at step %d (%s)." % (a.name, i, step.render())}
@@ -407,9 +468,20 @@ async def run(name: str) -> AsyncGenerator[Dict, None]:
     # row would otherwise pay for indexing twice and the first index is thrown away.
     if wrote and not any(s.verb == "reindex" for s in a.steps):
         from .index import build
-        res = await asyncio.to_thread(build, False)
-        yield {"type": "reindexed", "chunks": res.get("chunks_total"),
-               "docs": res.get("docs"), "detail": res}
+        # This is the slowest thing in the whole run — embedding is CPU-bound and
+        # measured 15 minutes for 35 changed documents on the target box — so it
+        # gets the same heartbeat as a step. Silence here was the original
+        # "network error".
+        summary = {}
+        async for ev in _awaiting(asyncio.to_thread(build, False),
+                                  {"type": "ping", "verb": "reindex",
+                                   "render": "reindex"}):
+            if ev["type"] == _RESULT:
+                summary = ev["result"] if isinstance(ev["result"], dict) else {}
+            else:
+                yield ev
+        yield {"type": "reindexed", "chunks": summary.get("chunks_total"),
+               "docs": summary.get("docs"), "detail": summary}
 
     yield {"type": "done", "ok": True, "ran": len(a.steps), "of": len(a.steps),
            "message": "%s finished all %d step%s."
@@ -458,6 +530,48 @@ def _selfcheck() -> int:
     case("more than MAX_STEPS",
          lambda: parse(good.replace("- radar", "\n".join(["- radar"] * 13))),
          expect_ok=False)
+
+    # The heartbeat, which exists because its absence read to the user as
+    # "network error" on a run that had actually succeeded. Driven with a short
+    # interval rather than the real one so the check stays fast.
+    async def _hb():
+        global HEARTBEAT_SECONDS
+        keep = HEARTBEAT_SECONDS
+        HEARTBEAT_SECONDS = 0.05
+        try:
+            async def slow():
+                await asyncio.sleep(0.35)
+                return {"ok": True, "output": "done"}
+            pings, result = 0, None
+            async for ev in _awaiting(slow(), {"type": "ping", "verb": "test"}):
+                if ev["type"] == _RESULT:
+                    result = ev["result"]
+                else:
+                    pings += 1
+                    assert ev["elapsed"] >= 0, ev
+
+            async def boom():
+                raise RuntimeError("kaboom")
+            crashed = None
+            async for ev in _awaiting(boom(), {"type": "ping", "verb": "test"}):
+                if ev["type"] == _RESULT:
+                    crashed = ev["result"]
+            return pings, result, crashed
+        finally:
+            HEARTBEAT_SECONDS = keep
+
+    pings, result, crashed = asyncio.run(_hb())
+    ok_hb = pings >= 2 and (result or {}).get("ok") is True
+    if not ok_hb:
+        ok = False
+    print("%s %-52s %d ping(s)"
+          % ("ok  " if ok_hb else "FAIL", "a slow step emits keepalive pings", pings))
+    ok_crash = (crashed or {}).get("ok") is False and "kaboom" in (crashed or {}).get("error", "")
+    if not ok_crash:
+        ok = False
+    print("%s %-52s %s"
+          % ("ok  " if ok_crash else "FAIL", "a step that raises becomes a failed result",
+             (crashed or {}).get("error", "")[:40]))
 
     found = load_all()
     print("\n%d activity file(s) on disk:" % len(found))

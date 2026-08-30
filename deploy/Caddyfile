@@ -21,6 +21,18 @@ __HOST__ {
 		# --forwarded-allow-ips flag), so the per-IP login lockout throttles the
 		# real client rather than counting every attempt as coming from Caddy.
 		header_up X-Forwarded-For {remote_host}
+
+		# Activities stream a frame per step, and the trailing reindex embeds on
+		# CPU — measured 15 minutes for 35 changed documents on a t3.micro.
+		# Buffering that response, or timing out an idle one, surfaces to the user
+		# as "network error" on a run that actually succeeded. `-1` disables
+		# buffering; the timeouts match deploy/Caddyfile.harness, which already
+		# learned this for the agent's own long turns.
+		flush_interval -1
+		transport http {
+			read_timeout 30m
+			write_timeout 30m
+		}
 	}
 
 	header {

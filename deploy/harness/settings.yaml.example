@@ -207,15 +207,31 @@ llm-pi-ai:
           contextWindow: 200000
           maxTokens: 8192
 
-    # ── Gemini, via the local thought_signature shim ────────────────────────
+    # ── Gemini, via the local shim ──────────────────────────────────────────
     #
-    # baseURL points at 127.0.0.1, not at Google. Gemini 3.x requires the
-    # thought_signature it returns with each tool call to be echoed back, and it
-    # travels in a non-standard `tool_calls[].extra_content.google` field that
-    # pi-ai's openai-completions path drops — so a second turn after any tool
-    # call answers 400. Verified 2026-08-30: direct + stripped = 400, through the
-    # shim = 200, at every reasoning level including omitted and "none".
+    # baseURL points at 127.0.0.1, not at Google, because two separate things
+    # have to be rewritten between pi-ai and Google's OpenAI-compat surface:
+    #
+    # 1. THE REQUEST SCHEMA. Google implements a subset of OpenAI's schema and
+    #    rejects the whole payload on an unknown field. pi-ai sends `store`, so
+    #    every turn answered
+    #      400 — Invalid JSON payload received. Unknown name "store".
+    #    This is why the route had never worked once, for anyone, at any
+    #    reasoning level. The shim strips 12 empirically-determined fields and
+    #    resolves the max_tokens/max_completion_tokens conflict Google also
+    #    refuses. It additionally strips-and-retries any *future* unknown field,
+    #    because this outage was caused by exactly one field being added.
+    #
+    # 2. THOUGHT SIGNATURES. Gemini 3.x requires the thought_signature it
+    #    returns with each tool call to be echoed back, and it travels in a
+    #    non-standard `tool_calls[].extra_content.google` field that pi-ai's
+    #    openai-completions path drops — so a second turn after any tool call
+    #    answers 400. Verified: replay with the field = 200, without = 400, at
+    #    every reasoning level including omitted and "none".
+    #
     # deploy/harness/gemini-shim/ holds the proxy, its unit, and the evidence.
+    # `curl 127.0.0.1:8787/healthz` reports cache size and how many fields it
+    # has dropped, which is the fastest way to confirm it is doing both jobs.
     #
     # pi-ai does not recognise a localhost endpoint, so it applies its OpenAI
     # defaults: system prompt as the `developer` role, output cap as
@@ -230,20 +246,75 @@ llm-pi-ai:
       # deploy/harness/harness.env (gitignored) and never enters this file.
       apiKeyEnv: GEMINI_API_KEY
 
+      # Availability sweep 2026-08-30, same key, same minute:
+      #   gemini-3.7-flash       503 "experiencing high demand", then timed out
+      #   gemini-3.6-flash       200
+      #   gemini-3.5-flash       200
+      #   gemini-3.1-flash-lite  200
+      # So 3.6 leads. 3.7 stays listed because the crunch is transient, but a
+      # default that 503s is indistinguishable from a broken install.
+      #
+      # `maxTokens: 8192` on all of them to match the house convention; Google
+      # will serve up to 65536 if you raise it.
+      #
+      # `off` is deliberately absent from every reasoningEfforts block: as a bare
+      # YAML key it parses as boolean false under YAML 1.1. Add it as
+      # `"off": none` (quoted) if wanted — Google does accept effort "none".
       models:
-        - id: gemini-3.7-flash
-          name: Gemini 3.7 Flash
+        # The default. Full 1M context, reasoning, tools, text+image.
+        - id: gemini-3.6-flash
+          name: Gemini 3.6 Flash
           contextWindow: 1048576
-          # 8192 to match the house convention. Gemini will serve up to 65536.
           maxTokens: 8192
-          # `off` is deliberately absent: as a bare YAML key it parses as boolean
-          # false under YAML 1.1. Add it as `"off": none` (quoted) if wanted —
-          # Google does accept reasoning_effort "none".
+          input: [ text, image ]
           reasoningEfforts:
             low: low
             medium: medium
             high: high
 
+        # Newest, and the one to prefer once Google's capacity settles.
+        - id: gemini-3.7-flash
+          name: Gemini 3.7 Flash (503s under load)
+          contextWindow: 1048576
+          maxTokens: 8192
+          input: [ text, image ]
+          reasoningEfforts:
+            low: low
+            medium: medium
+            high: high
+
+        # Older, and noticeably steadier under load than either 3.6 or 3.7.
+        - id: gemini-3.5-flash
+          name: Gemini 3.5 Flash
+          contextWindow: 1048576
+          maxTokens: 8192
+          input: [ text, image ]
+          reasoningEfforts:
+            low: low
+            medium: medium
+            high: high
+
+        # Cheapest and fastest of the four. For routine tool-loop turns where the
+        # reasoning quality of a Flash model is more than the step needs.
+        - id: gemini-3.1-flash-lite
+          name: Gemini 3.1 Flash Lite
+          contextWindow: 1048576
+          maxTokens: 8192
+          reasoningEfforts:
+            low: low
+            medium: medium
+            high: high
+
+# Gemini leads because it is the only route on this box that is both free and
+# actually answering. Measured 2026-08-30:
+#   - the OpenRouter key is out of credit: every paid model 402s with "requires
+#     more credits... you requested up to 8192 tokens, but can only afford 245",
+#     and its :free models share one exhausted 50/day account-wide allowance;
+#   - the OrcaRouter account has a $0 balance and a free-tier prompt-length cap
+#     (400 err_free_prompt_cap) that a real agent context exceeds immediately;
+#   - Google AI Studio's free tier has neither problem, and gemini-3.6-flash
+#     returned 200 with tool calls working end-to-end through the shim.
+# Move this back to a paid OpenRouter model the moment there is credit to spend.
 agent-default-model:
-  provider: openrouter
-  model: nvidia/nemotron-3-ultra-550b-a55b:free
+  provider: gemini
+  model: gemini-3.6-flash

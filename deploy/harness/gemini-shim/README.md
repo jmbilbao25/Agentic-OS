@@ -1,14 +1,64 @@
 # gemini-shim
 
-A loopback proxy that lets the harness talk to Gemini 3.x. It exists for exactly
-one reason: **DSH drops the `thought_signature` Gemini requires, so the turn after
-any tool call fails with a 400.**
+A loopback proxy that lets the harness talk to Gemini 3.x. It exists for **two**
+independent reasons, and either one alone is fatal to the route:
 
-Without it, Gemini looks like it works — chat is fine, the first tool call is fine
-— and then the agent loop dies on the turn that reads the tool result. Which is
-every real task in this vault.
+1. **Google rejects the request outright.** Its OpenAI-compatible surface
+   implements a *subset* of OpenAI's schema and refuses the whole payload on an
+   unknown field. pi-ai sends `store`, so every turn — chat included — answered
+   `400 Unknown name "store"`.
+2. **DSH drops the `thought_signature` Gemini requires**, so the turn after any
+   tool call fails with a different 400.
 
-## The problem
+Problem 1 masked problem 2 completely. Until it was fixed, *nothing* on this
+route had ever worked: not chat, not the first tool call, nothing. The evidence
+is in the journal — 13 consecutive real requests, every one of them carrying
+`store`, every one of them a 400.
+
+Once past it, problem 2 is what the rest of this document is about, and it bites
+only after a tool call: chat is fine, the first tool call is fine, and then the
+agent loop dies on the turn that reads the tool result. Which is every real task
+in this vault.
+
+## Problem 1: the request schema
+
+Google names the offending field, which makes this diagnosable in one log line:
+
+```
+400 INVALID_ARGUMENT — Invalid JSON payload received.
+                       Unknown name "store": Cannot find field.
+```
+
+The full refused set, determined empirically on 2026-08-30 by sending each
+documented Chat Completions field and recording which ones came back rejected:
+
+| Refused by Google | Accepted by Google |
+|---|---|
+| `store`, `metadata`, `logit_bias`, `seed`, `logprobs`, `top_logprobs`, `prediction`, `verbosity`, `safety_identifier`, `prompt_cache_key`, `frequency_penalty`, `usage` | `max_tokens`, `max_completion_tokens`, `modalities`, `n`, `parallel_tool_calls`, `presence_penalty`, `reasoning_effort`, `response_format`, `service_tier`, `stop`, `stream_options`, `temperature`, `top_p`, `user` |
+
+Plus one conflict that is not about unknown fields at all:
+
+```
+400 — "max_tokens and max_completion_tokens cannot both be set"
+```
+
+pi-ai can populate both. `sanitise()` drops the legacy `max_tokens` and keeps
+`max_completion_tokens`, which cannot change the effective cap.
+
+**It also strips-and-retries fields it has never heard of.** When a 400 names a
+field present in the body, the shim removes it and retries once, up to
+`SHIM_MAX_FIELD_STRIPS` (default 8), logging the name so it can be promoted into
+the static set. This is deliberate: the outage was caused by pi-ai adding exactly
+one field, so the generic case is worth more than handling `store` specifically.
+
+Proof the fix is real — identical body, two destinations:
+
+| Request | Result |
+|---|---|
+| with `store`, **through the shim** | **200** |
+| with `store`, **direct to Google** | **400 Unknown name "store"** |
+
+## Problem 2: thought signatures
 
 Gemini 3.x returns a signed thinking token with each tool call and requires it
 echoed back on the next turn. Google's OpenAI-compatible surface carries it in a
@@ -104,15 +154,29 @@ llm-pi-ai:
       baseURL: http://127.0.0.1:8787/v1
       apiKeyEnv: GEMINI_API_KEY
       models:
-        - id: gemini-3.7-flash
-          name: Gemini 3.7 Flash
+        # Leads because it answers; see Operating notes on 3.7's availability.
+        - id: gemini-3.6-flash
+          name: Gemini 3.6 Flash
           contextWindow: 1048576
           maxTokens: 8192
+          input: [ text, image ]
+          reasoningEfforts:
+            low: low
+            medium: medium
+            high: high
+        - id: gemini-3.7-flash
+          name: Gemini 3.7 Flash (503s under load)
+          contextWindow: 1048576
+          maxTokens: 8192
+          input: [ text, image ]
           reasoningEfforts:
             low: low
             medium: medium
             high: high
 ```
+
+`deploy/harness/settings.yaml.example` carries this route in full, with
+`gemini-3.5-flash` and `gemini-3.1-flash-lite` as well.
 
 `off` is deliberately absent: as a bare YAML key it parses as boolean `false`
 under YAML 1.1. Add it quoted — `"off": none` — if you want an Off level; Google
@@ -120,13 +184,28 @@ does accept `reasoning_effort: "none"`.
 
 ## Operating notes
 
-- **`gemini-3.7-flash` returns 503 "experiencing high demand" fairly often.**
-  pi-ai's default retry policy (normal mode, five retries) absorbs this; set
-  `retryPolicy` on the route if you want it more aggressive.
+- **`gemini-3.7-flash` is the least available model Google offers here.** An
+  availability sweep on one key inside one minute, 2026-08-30:
+
+  | Model | Result |
+  |---|---|
+  | `gemini-3.7-flash` | 503 "experiencing high demand", then a read timeout |
+  | `gemini-3.6-flash` | 200 |
+  | `gemini-3.5-flash` | 200 |
+  | `gemini-3.1-flash-lite` | 200 |
+
+  pi-ai's default retry policy (normal mode, five retries) absorbs an occasional
+  503, but it cannot absorb a model that is saturated — which is why the route
+  leads with `gemini-3.6-flash` and keeps 3.7 as a listed alternative rather than
+  the default. Set `retryPolicy` on the route if you want retries more aggressive.
 - Health and counters: `curl -s http://127.0.0.1:8787/healthz` reports
-  `cached_signatures`, `remembered`, `injected`, `requests`, `misses`. A rising
-  `misses` means leading tool calls arrived with no cached signature — expected
-  after a restart, suspicious otherwise.
+  `cached_signatures`, `remembered`, `injected`, `requests`, `misses` and
+  `dropped`. A rising `misses` means leading tool calls arrived with no cached
+  signature — expected after a restart, suspicious otherwise. `dropped` rising
+  in step with `requests` is normal, not a warning: it is `store` being removed
+  once per request. After four real agent tasks the counters read
+  `requests: 14, dropped: 18, remembered: 6, injected: 11, misses: 0` — which is
+  what a healthy route looks like, both jobs visibly doing work.
 - Logs go to journald: `journalctl -u gemini-shim -f`. The key and the signature
   body are never logged.
 - Bound to `127.0.0.1` deliberately. It performs no authentication of its own, so

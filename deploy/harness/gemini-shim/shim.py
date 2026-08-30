@@ -1,9 +1,28 @@
 #!/usr/bin/env python3
 """
-gemini-shim — a thought_signature-preserving proxy between DSH and Gemini.
+gemini-shim — a schema-fitting, thought_signature-preserving proxy between DSH
+and Gemini.
 
-WHY THIS EXISTS
----------------
+It does two separate jobs, because there are two separate incompatibilities
+between what pi-ai's `openai-completions` path sends and what Google's
+OpenAI-compatible surface accepts. Either one alone breaks the route.
+
+WHY THIS EXISTS — PART 1: THE REQUEST SCHEMA
+--------------------------------------------
+Google implements a *subset* of OpenAI's request schema and rejects the whole
+payload on an unknown field rather than ignoring it:
+
+    400 INVALID_ARGUMENT — Invalid JSON payload received.
+                           Unknown name "store": Cannot find field.
+
+pi-ai sends `store`. So every Gemini turn failed with that 400 and the signature
+handling below never even got reached — the route had never once worked in
+practice. See GOOGLE_UNSUPPORTED and sanitise() for the full refused set,
+determined empirically, plus an adaptive strip-and-retry so the next field pi-ai
+adds costs one round trip instead of the whole route.
+
+WHY THIS EXISTS — PART 2: THOUGHT SIGNATURES
+--------------------------------------------
 Gemini 3.x returns a `thought_signature` alongside every tool call and *requires*
 it echoed back on the next turn. Google's OpenAI-compatible surface carries it in
 a non-standard place:
@@ -47,6 +66,7 @@ conversation mid-tool-call; the next turn re-establishes it.
 
 import json
 import os
+import re
 import sys
 import threading
 import urllib.error
@@ -67,7 +87,7 @@ TIMEOUT = float(os.environ.get("SHIM_UPSTREAM_TIMEOUT", "900"))
 
 _lock = threading.Lock()
 _sigs: "OrderedDict[str, str]" = OrderedDict()
-_stats = {"remembered": 0, "injected": 0, "requests": 0, "misses": 0}
+_stats = {"remembered": 0, "injected": 0, "requests": 0, "misses": 0, "dropped": 0}
 
 
 def log(msg: str) -> None:
@@ -202,6 +222,67 @@ def harvest_stream_chunk(payload: str, partial: dict) -> None:
                 remember(slot["id"], slot["sig"])
 
 
+# ------------------------------------------------------------- schema fitting
+#
+# Google's OpenAI-compatible surface implements a SUBSET of OpenAI's request
+# schema, and it rejects the entire payload rather than ignoring a field it does
+# not recognise:
+#
+#     400 INVALID_ARGUMENT — Invalid JSON payload received.
+#                            Unknown name "store": Cannot find field.
+#
+# pi-ai's openai-completions path sends `store`. So before this list existed,
+# EVERY turn on the gemini route failed with that 400 — the route had never once
+# worked, and the thought_signature machinery below never got the chance to
+# matter. The signature bug is real, but it is the *second* bug in the path.
+#
+# Determined empirically on 2026-08-30 against gemini-3.7-flash by sending each
+# documented Chat Completions field and recording which ones Google refused.
+GOOGLE_UNSUPPORTED = frozenset({
+    "store", "metadata", "logit_bias", "seed", "logprobs", "top_logprobs",
+    "prediction", "verbosity", "safety_identifier", "prompt_cache_key",
+    "frequency_penalty", "usage",
+})
+
+# Verified ACCEPTED in the same sweep. Recorded so that a later reader does not
+# "tidy up" by adding them to the set above:
+#   max_tokens, max_completion_tokens, modalities, n, parallel_tool_calls,
+#   presence_penalty, reasoning_effort, response_format, service_tier, stop,
+#   stream_options, temperature, top_p, user
+#
+# `usage` is in the unsupported set because it is an OpenRouter extension
+# (`{"include": true}`), not an OpenAI field — it only appears here if a route
+# was copied from the openrouter block.
+
+# Google names the offending field in the error text, which lets the shim
+# recover from a field it has never seen instead of failing the turn. That
+# matters because this whole outage was caused by pi-ai adding one field.
+UNKNOWN_FIELD_RE = re.compile(r'Unknown name \\?"([^"\\]+)\\?"')
+
+# Bounded so a genuinely broken request cannot spin. Each strip is one retry.
+MAX_FIELD_STRIPS = int(os.environ.get("SHIM_MAX_FIELD_STRIPS", "8"))
+
+
+def sanitise(body: dict) -> list:
+    """Drop request fields Google's compat surface refuses. Returns what went."""
+    dropped = []
+    for key in list(body):
+        if key in GOOGLE_UNSUPPORTED:
+            body.pop(key, None)
+            dropped.append(key)
+
+    # A semantic conflict rather than an unknown field:
+    #     400 — "max_tokens and max_completion_tokens cannot both be set"
+    # pi-ai can populate both (it prefers max_completion_tokens for
+    # OpenAI-style endpoints but also carries the legacy alias). Keep the
+    # modern one; dropping the legacy alias cannot change the effective cap.
+    if "max_tokens" in body and "max_completion_tokens" in body:
+        body.pop("max_tokens", None)
+        dropped.append("max_tokens(both-caps-set)")
+
+    return dropped
+
+
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade", "content-length",
@@ -257,6 +338,14 @@ class Handler(BaseHTTPRequestHandler):
 
         n = inject(body)
         streaming = bool(body.get("stream"))
+
+        dropped = sanitise(body)
+        if dropped:
+            with _lock:
+                _stats["dropped"] += len(dropped)
+            # Loud on purpose. This one line is the difference between
+            # "Gemini is broken" and "Gemini needed a field removed".
+            log(f"dropped {len(dropped)} unsupported field(s): {', '.join(dropped)}")
         if n:
             log(f"re-attached {n} signature(s) | model={body.get('model')} stream={streaming}")
 
@@ -270,30 +359,55 @@ class Handler(BaseHTTPRequestHandler):
                 "shim received no Authorization header and GEMINI_API_KEY is unset"}})
             return
 
-        payload = json.dumps(body).encode()
-        req = urllib.request.Request(
-            f"{UPSTREAM}/chat/completions",
-            data=payload,
-            headers={"Authorization": auth, "Content-Type": "application/json",
-                     "Accept": "text/event-stream" if streaming else "application/json"},
-            method="POST",
-        )
+        # Adaptive strip-and-retry.
+        #
+        # GOOGLE_UNSUPPORTED covers what pi-ai sends today. This covers what it
+        # sends after its next release — which is precisely the failure that
+        # took this route down, so handling it once is worth more than handling
+        # `store` specifically. Google names the offending field, so one wasted
+        # round trip turns a dead turn into a live one and logs the field name
+        # to promote into the static set.
+        resp = None
+        for attempt in range(MAX_FIELD_STRIPS + 1):
+            req = urllib.request.Request(
+                f"{UPSTREAM}/chat/completions",
+                data=json.dumps(body).encode(),
+                headers={"Authorization": auth, "Content-Type": "application/json",
+                         "Accept": "text/event-stream" if streaming else "application/json"},
+                method="POST",
+            )
+            try:
+                resp = urllib.request.urlopen(req, timeout=TIMEOUT)
+                break
+            except urllib.error.HTTPError as exc:
+                detail = exc.read()
+                field = None
+                if exc.code == 400 and attempt < MAX_FIELD_STRIPS:
+                    found = UNKNOWN_FIELD_RE.search(detail.decode("utf-8", "replace"))
+                    if found and found.group(1) in body:
+                        field = found.group(1)
+                if field:
+                    body.pop(field, None)
+                    log(f"upstream rejected unknown field {field!r} — stripped it and "
+                        f"retried; add it to GOOGLE_UNSUPPORTED to skip this round trip")
+                    continue
+                self.send_response(exc.code)
+                passthrough = exc.headers.get("Content-Type", "application/json")
+                self.send_header("Content-Type", passthrough)
+                self.send_header("Content-Length", str(len(detail)))
+                self.end_headers()
+                self.wfile.write(detail)
+                log(f"upstream {exc.code}: {detail[:200]!r}")
+                return
+            except Exception as exc:  # network, DNS, timeout
+                self._json(502, {"error": {"message": f"shim could not reach Gemini: {exc}"}})
+                log(f"upstream unreachable: {exc}")
+                return
 
-        try:
-            resp = urllib.request.urlopen(req, timeout=TIMEOUT)
-        except urllib.error.HTTPError as exc:
-            detail = exc.read()
-            self.send_response(exc.code)
-            passthrough = exc.headers.get("Content-Type", "application/json")
-            self.send_header("Content-Type", passthrough)
-            self.send_header("Content-Length", str(len(detail)))
-            self.end_headers()
-            self.wfile.write(detail)
-            log(f"upstream {exc.code}: {detail[:200]!r}")
-            return
-        except Exception as exc:  # network, DNS, timeout
-            self._json(502, {"error": {"message": f"shim could not reach Gemini: {exc}"}})
-            log(f"upstream unreachable: {exc}")
+        if resp is None:
+            self._json(502, {"error": {"message":
+                f"shim exhausted {MAX_FIELD_STRIPS} field-strip retries"}})
+            log("exhausted field-strip retries")
             return
 
         with resp:

@@ -100,23 +100,29 @@ def _captures() -> List[Path]:
                   key=lambda p: p.stat().st_mtime, reverse=True)
 
 
+#: Exactly the layers `bin/os selftest` resolves a wikilink against. This list is
+#: a mirror, and it must not be generous: it once also offered `STATE` and
+#: `lessons` — both of which are real files at the vault root — and the doctor duly
+#: wrote `[[STATE]]` into two notes, which the selftest then failed the build on.
+#: A permitted link that the checker rejects is worse than no link at all, so the
+#: rule is to allow strictly what osutil.py's `names` set contains.
+LINK_LAYERS = ("wiki", "decisions", "output")
+
+
 def link_targets() -> List[str]:
     """Every stem a `[[wikilink]]` may resolve to.
 
-    Mirrors what `bin/os selftest` checks against — wiki, decisions and output —
-    so a link this module allows is a link the selftest accepts.
+    Mirrors `bin/osutil.py`'s `names` set exactly — the stems of wiki, decisions
+    and output, README excluded. Nothing else, however file-like: see LINK_LAYERS.
     """
     out = set()
-    for layer in ("wiki", "decisions", "output"):
+    for layer in LINK_LAYERS:
         d = config.VAULT / layer
         if not d.is_dir():
             continue
         for p in d.glob("*.md"):
             if p.name != "README.md":
                 out.add(p.stem)
-    for name in ("STATE", "lessons"):
-        if (config.VAULT / ("%s.md" % name)).is_file():
-            out.add(name)
     return sorted(out)
 
 
@@ -360,6 +366,20 @@ def _selfcheck() -> int:
        len(_parse_notes(json.dumps({"notes": [{"title": "T%d" % i, "body": "b"}
                                               for i in range(20)]}))),
        MAX_NOTES_PER_CAPTURE)
+
+    # The regression that produced this check: link_targets() offered STATE and
+    # lessons because both are real files, the doctor wrote [[STATE]], and
+    # `bin/os selftest` failed the build. This asserts the mirror stays a mirror.
+    allowed = set(link_targets())
+    for leaked in ("STATE", "lessons"):
+        if (config.VAULT / ("%s.md" % leaked)).is_file():
+            eq("%s is NOT offered as a link target" % leaked, leaked in allowed, False)
+    real = set()
+    for layer in LINK_LAYERS:
+        d = config.VAULT / layer
+        if d.is_dir():
+            real |= {p.stem for p in d.glob("*.md") if p.name != "README.md"}
+    eq("link targets are exactly wiki+decisions+output", allowed, real)
 
     print("\n%d capture(s), %d pending promotion" % (len(_captures()), len(pending())))
     print("%d valid link target(s)" % len(link_targets()))

@@ -345,7 +345,9 @@ async def _run_step(step: Step) -> Dict:
     if step.verb == "reindex":
         from .index import build
         res = await asyncio.to_thread(build, False)
-        return {"ok": True, "output": "indexed %s chunk(s)" % res.get("chunks", "?"),
+        return {"ok": True,
+                "output": "indexed %s chunk(s) across %s document(s)"
+                          % (res.get("chunks_total", "?"), res.get("docs", "?")),
                 "detail": res}
 
     if step.verb == "log":
@@ -406,7 +408,8 @@ async def run(name: str) -> AsyncGenerator[Dict, None]:
     if wrote and not any(s.verb == "reindex" for s in a.steps):
         from .index import build
         res = await asyncio.to_thread(build, False)
-        yield {"type": "reindexed", "chunks": res.get("chunks"), "detail": res}
+        yield {"type": "reindexed", "chunks": res.get("chunks_total"),
+               "docs": res.get("docs"), "detail": res}
 
     yield {"type": "done", "ok": True, "ran": len(a.steps), "of": len(a.steps),
            "message": "%s finished all %d step%s."

@@ -18,7 +18,7 @@ bin/os               the runtime — boot, capture, recall, loops, save
 config/              portable steering + skills, plus the global kernel
 adapters/install.sh  generates per-harness bindings from AGENTS.md
 brain/               the vault — raw → wiki → output, plus loops and journal
-server/              the visual second brain: hybrid search, RAG, gauntlet, orbit UI
+server/              the visual second brain: hybrid search, RAG, activities, orbit UI
 deploy/              always-on provisioning for a $10/mo box
 docs/index.html      generated static dashboard (GitHub Pages)
 ```

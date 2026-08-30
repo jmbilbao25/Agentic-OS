@@ -134,6 +134,14 @@ cmd_research() {
 }
 cmd_distill()  { ( cd "$ROOT" && "$(_py)" -m automations.distill "$@" ); }
 
+# Activities: named recipes in config/activities/, the same ones the web UI's
+# Activities panel shows as buttons. `os activities` lists them.
+cmd_activity() {
+  [ $# -ge 1 ] || { cmd_activities; return 0; }
+  ( cd "$ROOT" && "$(_py)" -m automations.activity "$@" )
+}
+cmd_activities() { ( cd "$ROOT" && "$(_py)" -m automations.activity --list ); }
+
 # radar + distill in one go, the shape the scheduled routine uses
 cmd_brief() {
   cmd_radar || return 1
@@ -173,9 +181,11 @@ case "${1:-boot}" in
   radar) shift; cmd_radar "$@" ;;
   research) shift; cmd_research "$@" ;;
   distill) shift; cmd_distill "$@" ;;
+  activity) shift; cmd_activity "$@" ;;
+  activities) cmd_activities ;;
   brief) shift; cmd_brief "$@" ;;
   dash) cmd_dash ;;
   save) shift; cmd_save "$@" ;;
   selftest) cmd_selftest ;;
-  *) die "usage: os {boot|log|lesson|note|capture|ship|decide|recall|loop|radar|research|distill|brief|dash|save|selftest}" ;;
+  *) die "usage: os {boot|log|lesson|note|capture|ship|decide|recall|loop|radar|research|distill|brief|activity|activities|dash|save|selftest}" ;;
 esac

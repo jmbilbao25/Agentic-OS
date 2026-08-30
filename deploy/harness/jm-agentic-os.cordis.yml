@@ -151,7 +151,7 @@
 # `config/skills/<name>/SKILL.md` is, by coincidence or good taste, exactly DSH's
 # skill format: a directory bundle whose frontmatter carries a kebab-case `name`
 # and a `description`. So the six skills this OS already has — taste, research,
-# second-brain, skill-forge, loop-engineering, gauntlet-loop — can be the harness's
+# second-brain, skill-forge, loop-engineering, activity-forge — can be the harness's
 # skills directly, with no conversion step and no second copy to drift.
 #
 # Both rows are disabled by the web bundle, which moves per-agent skill discovery

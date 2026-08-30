@@ -139,9 +139,10 @@ def main():
         @check("every API route refuses an unauthenticated caller")
         def _():
             gets = ["/api/status", "/api/graph", "/api/settings", "/api/models",
-                    "/api/search?q=x", "/api/doc?id=wiki/Ralph%20Loop"]
-            posts = ["/api/ask", "/api/gauntlet", "/api/reindex", "/api/sync",
-                     "/api/settings/reset", "/api/gauntlet/bar"]
+                    "/api/search?q=x", "/api/doc?id=wiki/Ralph%20Loop",
+                    "/api/activities"]
+            posts = ["/api/ask", "/api/reindex", "/api/sync",
+                     "/api/settings/reset", "/api/activities/run"]
             for p in gets:
                 assert client.get(p).status_code == 401, "GET %s was not gated" % p
             for p in posts:
@@ -346,7 +347,7 @@ def main():
             s = client.get("/api/settings").json()
             assert len(s["schema"]) >= 25, len(s["schema"])
             groups = {g["id"] for g in s["groups"]}
-            assert {"inference", "gauntlet", "retrieval", "embeddings",
+            assert {"inference", "retrieval", "embeddings",
                     "interface"} <= groups, groups
             for f in s["schema"]:
                 assert f["label"], "%s has no label" % f["key"]
@@ -412,7 +413,7 @@ def main():
             assert "NOT_A_SETTING" in r.json()["errors"]
 
         # ------------------------------------------------------- inference
-        print("\ninference and gauntlet")
+        print("\ninference")
 
         @check("Ask streams sources and a usable error when no key is set")
         def _():
@@ -432,32 +433,50 @@ def main():
         def _():
             assert client.post("/api/ask", json={"q": "  "}).status_code == 400
 
-        @check("the gauntlet refuses a bar too thin to judge against")
+        # ------------------------------------------------------ activities
+        print("\nactivities")
+
+        @check("the panel lists every activity with its resolved steps")
         def _():
-            events = sse(client, "/api/gauntlet",
-                         {"goal": "write something", "bar": "short"})
+            r = client.get("/api/activities")
+            assert r.status_code == 200, r.status_code
+            body = r.json()
+            names = {a["name"] for a in body["activities"]}
+            assert {"fetch-ai-news", "doctor"} <= names, names
+            assert not body["will_not_run"], body["will_not_run"]
+            news = next(a for a in body["activities"] if a["name"] == "fetch-ai-news")
+            assert [s["verb"] for s in news["steps"]] == ["radar", "distill"], news
+            assert "brain/raw/" in news["writes"], news["writes"]
+            return "%d activities, %d steps in the vocabulary" % (
+                len(names), len(body["steps"]))
+
+        @check("an unknown activity fails in-stream and names the real ones")
+        def _():
+            events = sse(client, "/api/activities/run", {"name": "does-not-exist"})
             err = [d["message"] for e, d in events if e == "error"]
             assert err, [e for e, _ in events]
-            assert "bar" in err[0].lower(), err[0]
+            assert "fetch-ai-news" in err[0], err[0]
+            assert [e for e, _ in events][-1] == "done", events
 
-        @check("the gauntlet refuses a goal with no bar at all")
+        @check("running an activity needs a name")
         def _():
-            events = sse(client, "/api/gauntlet", {"goal": "", "bar": "x" * 400})
-            assert any(e == "error" for e, _ in events), \
-                "an empty goal was accepted"
+            assert client.post("/api/activities/run", json={}).status_code == 400
 
-        @check("bar fetching refuses the local network")
+        @check("no activity can name a shell command")
         def _():
-            blocked = ["http://127.0.0.1:8000/healthz", "http://10.0.0.1/",
-                       "http://169.254.169.254/latest/meta-data/",
-                       "http://192.168.0.1/", "http://[::1]/",
-                       "file:///etc/passwd", "gopher://x/"]
-            for u in blocked:
-                r = client.post("/api/gauntlet/bar", json={"url": u})
-                assert r.status_code == 400, \
-                    "%s was not refused (%d) — the server is an open proxy" % (
-                        u, r.status_code)
-            return "%d addresses" % len(blocked)
+            from server import activities as act
+            from server.authoring import WriteRefused
+            assert "shell" not in act.STEPS, \
+                "a shell verb exists — brain/raw/ is untrusted input"
+            body = ("---\nname: x\ndescription: %s\n---\n\n## Steps\n\n- shell: id\n"
+                    % ("d" * 40))
+            for step in ("- shell: id", "- bash: id", "- run: rm -rf /", "- eval: x"):
+                try:
+                    act.parse(body.replace("- shell: id", step), "x")
+                except WriteRefused:
+                    continue
+                raise AssertionError("%r was accepted as a step" % step)
+            return "4 injection shapes refused"
 
         @check("the model catalogue normalises whatever the provider returns")
         def _():

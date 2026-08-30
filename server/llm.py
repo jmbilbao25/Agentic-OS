@@ -259,7 +259,7 @@ async def complete(messages: List[Dict], *, model: str = None,
                    temperature: float = None, max_tokens: int = None) -> Dict:
     """Non-streaming call. Returns {text, model, usage, error}.
 
-    The gauntlet critic uses this: its verdict is a small structured answer that
+    The doctor uses this: its note list is a small structured answer that
     nobody needs to watch arrive token by token.
     """
     if not configured():

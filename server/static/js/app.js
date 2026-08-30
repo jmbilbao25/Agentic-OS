@@ -11,7 +11,7 @@ import { LAYOUTS } from './layouts.js';
 import { Palette } from './palette.js';
 import { ModelPicker, setCatalogue } from './models.js';
 import { DocView, AskView } from './views.js';
-import { GauntletView } from './gauntlet.js';
+import { ActivitiesView } from './activities.js';
 import { SettingsView } from './settings.js';
 
 const $ = (s) => document.querySelector(s);
@@ -64,13 +64,14 @@ let activeTab = null;
 function openTab(name) {
   activeTab = name;
   dock.classList.add('open');
-  dock.classList.toggle('wide', name === 'gauntlet' || name === 'settings');
+  dock.classList.toggle('wide', name === 'activities' || name === 'settings');
   document.querySelectorAll('.tab').forEach((t) =>
     t.setAttribute('aria-selected', String(t.dataset.tab === name)));
   document.querySelectorAll('.view').forEach((v) =>
     v.classList.toggle('active', v.id === `view-${name}`));
 
   if (name === 'settings') settings.load().catch(handle);
+  if (name === 'activities') activitiesView.load().catch(handle);
   if (name === 'ask') setTimeout(() => askView.focus(), 60);
   syncChrome();
 }
@@ -129,10 +130,6 @@ function releaseFocus() {
 
 const askModel = new ModelPicker($('#ask-model-combo'),
   { blank: 'Use the saved model', onChange: () => {} });
-const gBuilder = new ModelPicker($('#g-builder-combo'),
-  { blank: 'Use the saved builder' });
-const gCritic = new ModelPicker($('#g-critic-combo'),
-  { blank: 'Use the saved critic' });
 
 const setBusy = (b) => { state.busy = b; };
 
@@ -162,9 +159,10 @@ const askView = new AskView({
   onOpenDoc: guard(openDoc), modelPicker: askModel, toast, onBusy: setBusy,
 });
 
-const gauntletView = new GauntletView({
-  builderPicker: gBuilder, criticPicker: gCritic, toast,
-  onOpenDoc: guard(openDoc), onBusy: setBusy,
+const activitiesView = new ActivitiesView({
+  toast, onOpenDoc: guard(openDoc), onBusy: setBusy,
+  // An activity that wrote a note leaves the map one revision behind the vault.
+  onWrote: guard(() => loadGraph()),
 });
 
 const settings = new SettingsView({
@@ -405,13 +403,6 @@ async function refreshStatus() {
   });
   document.body.classList.toggle('reduced-motion',
     !!state.status.ui?.reduced_motion);
-  gauntletView.setDefaults(state.status.gauntlet);
-  if (state.status.gauntlet) {
-    if (!gBuilder.value) gBuilder.input.placeholder =
-      `Use the saved builder · ${shortModel(state.status.gauntlet.builder)}`;
-    if (!gCritic.value) gCritic.input.placeholder =
-      `Use the saved critic · ${shortModel(state.status.gauntlet.critic)}`;
-  }
   if (state.status.model) {
     askModel.input.placeholder = `Use the saved model · ${shortModel(state.status.model)}`;
   }
@@ -457,8 +448,8 @@ async function boot() {
 const commands = () => [
   { label: 'Ask the vault', hint: 'Retrieval-grounded answer', keys: 'A',
     run: () => { openTab('ask'); askView.focus(); } },
-  { label: 'Run a gauntlet', hint: 'Builder vs critic against a real bar',
-    keys: 'G', run: () => openTab('gauntlet') },
+  { label: 'Activities', hint: 'Run an automation — radar, distill, doctor',
+    keys: 'E', run: () => openTab('activities') },
   { label: 'Settings', hint: 'Model, provider, retrieval, interface', keys: ',',
     run: () => openTab('settings') },
   { label: 'Sync from git', hint: 'git pull, then reindex',
@@ -567,13 +558,11 @@ document.addEventListener('click', (e) => {
   switch (t.dataset.act) {
     case 'palette': palette.toggle(); break;
     case 'ask': openTab('ask'); askView.focus(); break;
-    case 'gauntlet': openTab('gauntlet'); break;
+    case 'activities': openTab('activities'); break;
     case 'settings': openTab('settings'); break;
     case 'close-dock': closeDock(); break;
     case 'ask-send': askView.ask().catch(handle); break;
-    case 'fetch-bar': gauntletView.fetchBar().catch(handle); break;
-    case 'gauntlet-run': gauntletView.run().catch(handle); break;
-    case 'gauntlet-stop': gauntletView.stop(); break;
+    case 'activity-stop': activitiesView.stop(); break;
     case 'settings-save': settings.save().catch(handle); break;
     case 'settings-reset': settings.resetAll().catch(handle); break;
     case 'clear-filter': setFilter(null); break;
@@ -585,13 +574,6 @@ $('#ask-q').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
     e.preventDefault();
     askView.ask().catch(handle);
-  }
-});
-
-$('#g-goal').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-    e.preventDefault();
-    gauntletView.run().catch(handle);
   }
 });
 
@@ -659,7 +641,7 @@ document.addEventListener('keydown', (e) => {
     case '#': e.preventDefault(); palette.open('#'); break;
     case '@': e.preventDefault(); palette.open('@'); break;
     case 'a': case 'A': openTab('ask'); askView.focus(); break;
-    case 'g': case 'G': openTab('gauntlet'); break;
+    case 'e': case 'E': openTab('activities'); break;
     case ',': openTab('settings'); break;
     case '0': orbit.reset(); break;
     // 1-4 select a layout. Adjacent to 0 (reset the view), which is the family
@@ -682,7 +664,7 @@ document.addEventListener('keydown', (e) => {
 /* Leaving mid-stream should not silently keep the provider generating. */
 window.addEventListener('beforeunload', () => {
   askView.stop();
-  gauntletView.stop();
+  activitiesView.stop();
 });
 
 boot();

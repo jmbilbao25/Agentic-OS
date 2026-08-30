@@ -49,6 +49,16 @@ link() {
 link_skills() {
   local dir="$1"
   mkdir -p "$dir"
+  # Prune first. A binding is a mirror of config/skills, and this script only ever
+  # added to it — so deleting a skill left a dangling symlink that every harness
+  # still tried to load, and `--list` still called bound. Removing a capability has
+  # to be as complete as adding one.
+  for l in "$dir"/*; do
+    [ -e "$l" ] && continue          # exists (or resolves) — keep
+    [ -L "$l" ] || continue          # not a symlink at all — leave it alone
+    rm -f "$l"
+    echo "  prune  $l (source deleted)"
+  done
   for s in config/skills/*/; do
     [ -d "$s" ] || continue
     link "$dir/$(basename "$s")" "$s"

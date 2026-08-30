@@ -700,51 +700,85 @@ select {
 }
 .combo-opt .free { color: var(--ok); }
 
-/* ------------------------------------------------------------- gauntlet */
+/* ----------------------------------------------------------- activities */
 
-.gauntlet-setup { display: grid; gap: var(--s4); }
-.two-up { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s3); }
+.act-head h3 { font-size: 14px; margin-bottom: 4px; }
+.act-head p { font-size: 12.5px; color: var(--fg-1); margin-bottom: var(--s4); }
+.act-head code, .act-vocab code, .act-notice code { font-family: var(--mono); font-size: 11px; }
+.act-notice { margin-bottom: var(--s3); }
 
-.rounds { display: flex; flex-direction: column; gap: var(--s3); }
-.round {
+.act-list { display: flex; flex-direction: column; gap: var(--s3); }
+
+.act {
   border: 1px solid var(--line-0); border-radius: var(--r);
-  background: var(--bg-inset); overflow: hidden;
+  background: var(--bg-inset); padding: var(--s3) var(--s4);
 }
-.round-head {
-  display: flex; align-items: center; gap: var(--s2);
-  padding: 9px 12px; background: var(--bg-2);
-  border-bottom: 1px solid var(--line-0);
-  font: 600 11px/1 var(--sans); letter-spacing: .1em; text-transform: uppercase;
-  color: var(--fg-1);
+.act-top { display: flex; align-items: flex-start; gap: var(--s3); }
+.act-id { min-width: 0; flex: 1; }
+/* The name is a button because it opens the recipe. An activity you cannot read
+   before running is a button you have to trust blindly. */
+.act-name {
+  font: 600 13px/1.2 var(--mono); color: var(--fg-0);
+  background: none; border: 0; padding: 0; cursor: pointer; text-align: left;
 }
-.round-head .who {
-  margin-left: auto; font-family: var(--mono); font-size: 10px;
-  letter-spacing: 0; text-transform: none; color: var(--fg-2);
+.act-name:hover { text-decoration: underline; }
+.act-id p { font-size: 12.5px; color: var(--fg-1); margin-top: 4px; }
+.act-run { flex: none; }
+
+.act-meta {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  margin-top: var(--s3);
 }
-.round-body { padding: var(--s3) var(--s4); }
-.artifact {
-  font-size: 13px; max-height: 340px; overflow-y: auto;
-  padding-right: var(--s2);
+.act-step {
+  font-family: var(--mono); font-size: 10.5px; color: var(--fg-1);
+  background: var(--bg-2); border: 1px solid var(--line-0);
+  border-radius: 4px; padding: 3px 7px;
 }
-.verdict {
-  display: flex; gap: var(--s3); align-items: flex-start;
-  padding: var(--s3) var(--s4);
+.act-arrow { color: var(--fg-2); font-size: 11px; }
+.act-writes {
+  margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--fg-2);
+}
+.act-writes b { color: var(--fg-1); font-weight: 500; }
+
+.act-blocked {
+  display: flex; align-items: center; gap: 7px;
+  margin-top: var(--s3); font-size: 12px; color: var(--warn);
+}
+.act-blocked .i { width: 14px; height: 14px; flex: none; }
+
+/* The log lives inside the card that produced it: press two buttons over a
+   morning and you still know which output belongs to which. */
+.act-log {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-top: var(--s3); padding-top: var(--s3);
   border-top: 1px solid var(--line-0);
 }
-.verdict .badge {
-  font: 600 10px/1 var(--sans); letter-spacing: .1em; text-transform: uppercase;
-  border-radius: 4px; padding: 5px 8px; flex: none;
+.act-line { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; }
+.act-line .i, .act-line .spin { width: 13px; height: 13px; flex: none; margin-top: 1px; }
+.act-line-t { min-width: 0; }
+.act-line-t b { font-family: var(--mono); font-size: 11px; color: var(--fg-0); }
+.act-line-t span { display: block; margin-top: 2px; color: var(--fg-2); overflow-wrap: anywhere; }
+.act-line.ok .i { color: var(--ok); }
+.act-line.bad .i { color: var(--bad); }
+.act-line.bad .act-line-t span { color: var(--bad); }
+
+.act-done { margin-top: 2px; font-size: 12px; font-weight: 600; }
+.act-done.ok { color: var(--ok); }
+.act-done.bad { color: var(--bad); }
+
+.act-vocab { margin-top: var(--s5); font-size: 12px; }
+.act-vocab summary { cursor: pointer; color: var(--fg-1); padding: var(--s2) 0; }
+.act-vocab table { width: 100%; border-collapse: collapse; margin-top: var(--s2); }
+.act-vocab th, .act-vocab td {
+  text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line-0);
+  vertical-align: top;
 }
-.verdict.won .badge { color: #04240f; background: var(--ok); }
-.verdict.lost .badge { color: #2a1200; background: var(--warn); }
-.verdict.tie .badge { color: var(--fg-1); background: var(--bg-3); }
-.verdict .why { min-width: 0; font-size: 12.5px; color: var(--fg-1); }
-.verdict .why b { color: var(--fg-0); }
-.verdict .gap {
-  display: block; margin-top: 5px; padding-left: var(--s3);
-  border-left: 1px solid var(--line-2);
+.act-vocab th {
+  font: 600 10px/1 var(--sans); letter-spacing: .09em; text-transform: uppercase;
   color: var(--fg-2);
 }
+.act-vocab td { color: var(--fg-1); }
+.act-vocab p { margin-top: var(--s3); color: var(--fg-2); }
 
 .phase {
   display: inline-flex; align-items: center; gap: 7px;
@@ -1078,7 +1112,6 @@ body.auth {
   .palette { top: 0; left: 0; width: 100vw; max-height: 100vh; height: 100%;
     border-radius: 0; transform: translateY(-8px); }
   .palette.open { transform: none; }
-  .two-up { grid-template-columns: 1fr; }
   .view-body { padding: var(--s4); }
   .notices { left: var(--s3); right: var(--s3); max-width: none; }
 }

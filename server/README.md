@@ -22,7 +22,8 @@ embed.py      local CPU embeddings, lazily loaded and allowed to be absent
 index.py      build the SQLite index (FTS5 + sqlite-vec)
 search.py     hybrid retrieval, fused with weighted RRF + a name-match nudge
 llm.py        OpenAI-compatible inference, model routing, the model catalogue
-gauntlet.py   the builder/critic loop
+activities.py the activity format, its step whitelist, and the runner
+doctor.py     promotes brain/raw into linked brain/wiki notes
 auth.py       single-user credential auth
 app.py        routes
 static/       the UI: orbit.js (canvas map), md.js (renderer), and one module per view
@@ -59,7 +60,8 @@ For the always-on deployment see [`../deploy/README.md`](../deploy/README.md).
 ```bash
 python -m server.tools.smoke     # 37 end-to-end checks, no server needed
 python -m server.settings        # settings layer self-check
-python -m server.gauntlet        # verdict parsing, blinding, SSRF guard
+python -m server.activities      # the step parser and its refusals
+python -m server.doctor          # wikilink resolution, JSON tolerance
 python -m server.passwd --selfcheck
 ```
 
@@ -157,7 +159,7 @@ Together, a local Ollama at `/v1` and your own proxy are all the same code path.
   server-side (faster and cheaper than a failed round trip); other providers get a
   client-side retry. A free-tier model rate-limiting mid-sentence is the normal
   case, not the exception.
-- **Per-request override.** Ask and Gauntlet can each name a model without changing
+- **Per-request override.** Ask can name a model without changing
   the saved default.
 - **Usage and cost** stream back as their own SSE event, so the UI can report tokens
   and spend rather than guessing.
@@ -165,29 +167,62 @@ Together, a local Ollama at `/v1` and your own proxy are all the same code path.
   check it in Settings"; a 429 says free-tier models do this and suggests a
   fallback.
 
-## The gauntlet loop
+## Activities
 
-A builder drafts from your vault; a **separate** critic with fresh context compares
-it against a real reference **blind**, labels stripped and sides randomised per
-round, and names one concrete gap. It loops until the critic picks ours.
+An automation recipe, one file each in `config/activities/`, shown as a button in
+the Activities panel. `fetch-ai-news` is `radar` then `distill`; `doctor` promotes
+captures into linked notes.
 
-The four ways this fails are the four things the implementation is built around: a
-vague bar (refused up front — a bar under 200 characters cannot be judged against),
-the builder judging its own work (separate call, separate model, no history), a soft
-critic (a forced A/B, never a score out of ten), and exiting after N rounds (the
-ceiling is a cost stop, and hitting it is reported as a loss).
+```markdown
+---
+name: fetch-ai-news
+description: What it does, and when to press it.
+---
 
-Set the builder and critic to **different** models. Same model on both sides is the
-"builder judging its own work" failure wearing two hats; the app warns and runs
-anyway, because sometimes it is all you have.
+## Steps
 
-`bar_url` fetches a page instead of pasting one. Private, loopback and link-local
-addresses are refused: the server holds an API key and sits inside your network, so
-"fetch this URL for me" is a request to make it your proxy.
+- radar
+- distill
+```
 
-See [`../config/skills/gauntlet-loop/SKILL.md`](../config/skills/gauntlet-loop/SKILL.md).
-The pattern is adapted from [gauntlet-loop](https://github.com/robonuggets/gauntlet-loop)
-by robonuggets (CC BY 4.0).
+**Steps are a closed vocabulary, not shell.** `STEPS` in `activities.py` is the
+whole list — `radar`, `research: <topic>`, `distill`, `doctor`, `reindex`,
+`log: <text>` — and there is deliberately no verb that runs a command. The reason
+is specific: `brain/raw/` is text fetched from the internet, activities are
+authored by an agent that reads it, and they are then executed by a human pressing
+a button. A `shell:` verb would make "summarise this captured page" a route to
+arbitrary execution with the user supplying the click. Adding a capability is a
+reviewed edit to `STEPS`; composing existing ones is data.
+
+That closure is also what makes authorship safe to hand to a small model.
+`mcp__agentos__write_activity` takes a name, a description and a JSON array of
+steps, and every refusal ends with the full vocabulary — so a model that guesses
+wrong fixes itself on the next call rather than retrying the same mistake.
+
+Run one from the panel, or `bin/os activity fetch-ai-news`. Both call
+`activities.run()`; a surface that reimplements a routine drifts from it.
+
+## The doctor
+
+`distill` writes a digest to `brain/output/` — a dated artifact, deliberately not
+knowledge. `doctor.py` does the promotion the kernel describes: for each capture
+nobody has promoted, at most five atomic notes into `brain/wiki/`, each required
+to link into knowledge that already exists.
+
+Links are constrained **and** verified. The model is handed the exact list of
+existing note titles and told to link only to those; then every `[[link]]` it
+produced is re-checked against that list, unresolvable ones are unwrapped to plain
+text, and case differences are repaired to the real stem. Both halves are
+necessary — `bin/os selftest` fails the build on a broken wikilink, and a model
+will confidently invent a target for a note the vault does not have.
+
+Three refusals worth knowing: a proposed title the vault already has is dropped
+rather than overwritten (merging a machine's paragraph into your note is a harder
+operation than creating one), a note with no resolvable link is dropped as an
+orphan, and the capture arrives inside the same UNTRUSTED DATA envelope `mcp.py`
+uses, because this is the one path where fetched text reaches a model whose output
+is written back into the vault. Every note is tagged `doctor` and `draft`, carries
+its source capture, and is its own git commit.
 
 ## Security
 
@@ -231,8 +266,8 @@ by robonuggets (CC BY 4.0).
 | `GET /api/doc?id=` | one document, frontmatter parsed, plus backlinks and outgoing links |
 | `GET /api/search?q=&k=&layers=` | hybrid search |
 | `POST /api/ask` | SSE: `sources`, `retrieval`, `model`, `delta`, `usage`, `done` |
-| `POST /api/gauntlet` | SSE: `start`, `round`, `builder_delta`, `verdict`, `done` |
-| `POST /api/gauntlet/bar` | fetch a reference artifact from a URL |
+| `GET /api/activities` | the roster, the step vocabulary, and files that will not parse |
+| `POST /api/activities/run` | SSE: `start`, `step`, `step_done`, `reindexed`, `done` |
 | `GET /api/settings` | the schema, current values, and where each came from |
 | `PUT /api/settings` | validate and persist; 422 with per-field errors |
 | `POST /api/settings/reset` | forget saved values, fall back to env and defaults |
@@ -271,11 +306,11 @@ Three interaction decisions worth knowing:
 - **Filtered-out notes ghost rather than vanish.** Dragging the recency scrubber
   should show the vault thinning out over time, not delete two thirds of the picture.
 
-One dock holds the four views — Note, Ask, Gauntlet, Settings — because reading a
+One dock holds the four views — Note, Ask, Activities, Settings — because reading a
 note, asking a question and changing a model are all the same act, and they should
 share a position you learn once.
 
 **Keys.** `/` search · `>` commands · `#` tags · `@` layers · `Ctrl/Cmd-K` palette ·
-`A` ask · `G` gauntlet · `,` settings · `j`/`k` walk the link graph · `0` reset ·
+`A` ask · `E` activities · `,` settings · `j`/`k` walk the link graph · `0` reset ·
 `+`/`-` zoom · `Esc` unwinds one layer at a time · drag to pan, wheel to zoom,
 pinch on touch.

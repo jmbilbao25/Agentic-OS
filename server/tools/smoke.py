@@ -140,7 +140,8 @@ def main():
         def _():
             gets = ["/api/status", "/api/graph", "/api/settings", "/api/models",
                     "/api/search?q=x", "/api/doc?id=wiki/Ralph%20Loop",
-                    "/api/activities"]
+                    "/api/activities", "/api/activities/runs",
+                    "/api/activities/runs/nope"]
             posts = ["/api/ask", "/api/reindex", "/api/sync",
                      "/api/settings/reset", "/api/activities/run"]
             for p in gets:
@@ -450,13 +451,47 @@ def main():
             return "%d activities, %d steps in the vocabulary" % (
                 len(names), len(body["steps"]))
 
-        @check("an unknown activity fails in-stream and names the real ones")
+        @check("an unknown activity is refused before a run is created")
         def _():
-            events = sse(client, "/api/activities/run", {"name": "does-not-exist"})
-            err = [d["message"] for e, d in events if e == "error"]
-            assert err, [e for e, _ in events]
-            assert "fetch-ai-news" in err[0], err[0]
-            assert [e for e, _ in events][-1] == "done", events
+            r = client.post("/api/activities/run", json={"name": "does-not-exist"})
+            assert r.status_code == 400, r.status_code
+            # The refusal has to name what does exist, or the only way to discover
+            # the real names is to read the filesystem.
+            assert "fetch-ai-news" in r.json()["error"], r.json()
+
+        @check("a run outlives the request that started it")
+        def _():
+            r = client.post("/api/activities/run", json={"name": "doctor"})
+            assert r.status_code == 200, r.text
+            rid = r.json()["run_id"]
+            assert r.json()["running"] is True, r.json()
+
+            # The log is addressable immediately, by id, from a second request —
+            # which is the property that makes a dropped connection survivable.
+            got = client.get("/api/activities/runs/%s" % rid)
+            assert got.status_code == 200, got.text
+            body = got.json()
+            assert body["run_id"] == rid and body["name"] == "doctor", body
+            assert "next" in body and isinstance(body["events"], list), body
+
+            listed = client.get("/api/activities/runs").json()
+            assert any(x["run_id"] == rid for x in listed["runs"]), listed
+            return "run %s addressable after the POST returned" % rid
+
+        @check("a cursor never replays or skips an event")
+        def _():
+            rid = client.post("/api/activities/run",
+                              json={"name": "doctor"}).json()["run_id"]
+            first = client.get("/api/activities/runs/%s?after=0" % rid).json()
+            again = client.get("/api/activities/runs/%s?after=%d"
+                               % (rid, first["next"])).json()
+            assert again["next"] >= first["next"], (first, again)
+            for ev in again["events"]:
+                assert ev not in first["events"], "event replayed across the cursor"
+
+        @check("an unknown run id is a 404, so the panel stops polling")
+        def _():
+            assert client.get("/api/activities/runs/deadbeef").status_code == 404
 
         @check("running an activity needs a name")
         def _():

@@ -373,13 +373,6 @@ async def _run_step(step: Step) -> Dict:
         return {"ok": True, "output": "appended to %s" % res.get("path", "the journal"),
                 "detail": res}
 
-    if step.verb == "doctor":
-        from . import doctor
-        res = await doctor.run()
-        return {"ok": res.get("ok", False),
-                "output": res.get("summary", ""),
-                "error": res.get("error", ""), "detail": res}
-
     cmd = _module_step(step.verb, step.arg)
     try:
         p = await asyncio.to_thread(
@@ -425,6 +418,34 @@ async def _awaiting(coro, ping: Dict) -> AsyncGenerator[Dict, None]:
            "elapsed": round(time.monotonic() - t0, 1)}
 
 
+async def _doctor_events(n: int, of: int) -> AsyncGenerator[Dict, None]:
+    """Forward the doctor's own narration, then one `_RESULT`.
+
+    The doctor is the only step that reports on itself, because it is the only one
+    where the interesting part is *what it decided* — which capture, which notes,
+    which links it had to drop — rather than whether it exited zero. Its events are
+    passed through with a `doctor_` prefix so the panel can style them apart from
+    step machinery without having to know what they mean.
+    """
+    from . import doctor
+
+    summary = {"ok": False, "summary": "", "error": "the doctor produced no result"}
+    async for ev in doctor.run():
+        if ev.get("type") == "done":
+            summary = ev
+            continue
+        out = dict(ev)
+        out["type"] = "doctor_%s" % ev.get("type", "notice")
+        out["n"] = n
+        out["of"] = of
+        yield out
+    yield {"type": _RESULT,
+           "result": {"ok": bool(summary.get("ok")),
+                      "output": summary.get("summary", ""),
+                      "error": summary.get("error", ""),
+                      "detail": summary}}
+
+
 async def run(name: str) -> AsyncGenerator[Dict, None]:
     """Execute an activity, yielding one event per step.
 
@@ -445,12 +466,15 @@ async def run(name: str) -> AsyncGenerator[Dict, None]:
 
         res = {"ok": False, "error": "the step produced no result"}
         elapsed = 0.0
-        async for ev in _awaiting(_run_step(step),
-                                  {"type": "ping", "n": i, "of": len(a.steps),
-                                   "verb": step.verb, "render": step.render()}):
+        started = time.monotonic()
+        source = (_doctor_events(i, len(a.steps)) if step.verb == "doctor"
+                  else _awaiting(_run_step(step),
+                                 {"type": "ping", "n": i, "of": len(a.steps),
+                                  "verb": step.verb, "render": step.render()}))
+        async for ev in source:
             if ev["type"] == _RESULT:
                 res = ev["result"]
-                elapsed = ev["elapsed"]
+                elapsed = ev.get("elapsed") or round(time.monotonic() - started, 1)
             else:
                 yield ev
 

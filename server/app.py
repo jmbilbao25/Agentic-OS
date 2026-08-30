@@ -35,7 +35,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import (activities, auth, config, embed, llm, mcp, search, settings,
+from . import (activities, auth, config, embed, llm, mcp, runs, search, settings,
                vault)
 from .authoring import WriteRefused
 
@@ -290,31 +290,94 @@ async def api_activities(u=Depends(user)):
     }
 
 
+#: Live task handles. Held so the event loop cannot garbage-collect a run that
+#: nobody is currently awaiting — which is the normal state here, by design.
+_RUN_TASKS = set()
+
+
+async def _drive(run: runs.Run) -> None:
+    """Consume an activity's events into its run log. Never raises."""
+    ok, message = False, ""
+    try:
+        async for ev in activities.run(run.name):
+            runs.append(run, ev)
+            if ev.get("type") == "done":
+                ok = bool(ev.get("ok"))
+                message = ev.get("message", "")
+    except WriteRefused as e:
+        # A refusal is the activity being unrunnable, not a server fault, and its
+        # message names the fix — so it belongs in the log the panel renders.
+        runs.append(run, {"type": "error", "message": str(e)})
+        message = str(e)
+    except asyncio.CancelledError:
+        runs.append(run, {"type": "error", "message": "the run was cancelled"})
+        runs.finish(run, False, "cancelled")
+        raise
+    except Exception as e:                                  # noqa: BLE001
+        log.exception("activity %r failed", run.name)
+        runs.append(run, {"type": "error",
+                          "message": "%s: %s" % (type(e).__name__, e)})
+        message = "%s: %s" % (type(e).__name__, e)
+    finally:
+        if run.running:
+            runs.finish(run, ok, message)
+
+
 @app.post("/api/activities/run")
 async def api_activities_run(request: Request, u=Depends(user)):
-    """Run one activity, streaming a frame per step.
+    """Start an activity in the background and answer with its run id.
 
-    This is the same `activities.run()` that `bin/os activity` calls, for the
-    reason recorded above AUTOMATIONS: a dashboard that reimplements its own
-    routines drifts from them, and the drift is only found when one is wrong.
+    Deliberately not a stream. The first version held one SSE response open for
+    the whole run, which works until the run is long: the doctor takes ~80 seconds
+    over three captures, a phone on cellular gave up at 50, and the user was shown
+    "network error" for a run the server went on to complete successfully. The
+    connection was the only thing that failed, and it was also the only thing
+    reporting.
+
+    So the run outlives its caller. Poll /api/activities/runs/{id} for the log —
+    a dropped connection, a lock screen or a page reload all become survivable,
+    and the feed rejoins from an offset instead of orphaning the work.
     """
     body = await request.json()
     name = (body.get("name") or "").strip()
     if not name:
         raise HTTPException(400, "no activity named")
 
-    async def gen():
-        try:
-            async for ev in activities.run(name):
-                yield _frame(ev.get("type", "notice"), ev)
-        except WriteRefused as e:
-            # A refusal is the activity being unrunnable, not a server fault, and
-            # its message names the fix — so it belongs in the stream the panel
-            # renders rather than in a status code the panel turns into "failed".
-            yield _frame("error", {"message": str(e)})
-            yield _frame("done", {"ok": False, "message": "%s did not run." % name})
+    # Refuse a second copy rather than running two. These steps write to the vault
+    # and commit; two radars racing would fight over the same dated capture.
+    busy = runs.active(name)
+    if busy is not None:
+        return {"run_id": busy.id, "name": name, "running": True,
+                "already_running": True}
 
-    return _sse(gen())
+    try:
+        activities.load(name)          # fail here, with the reason, not in the log
+    except WriteRefused as e:
+        raise HTTPException(400, str(e))
+
+    run = runs.start(name)
+    task = asyncio.create_task(_drive(run))
+    _RUN_TASKS.add(task)
+    task.add_done_callback(_RUN_TASKS.discard)
+    return {"run_id": run.id, "name": name, "running": True}
+
+
+@app.get("/api/activities/runs")
+async def api_activity_runs(u=Depends(user)):
+    """Recent runs, newest first, plus whichever is live — so a reload can rejoin."""
+    live = runs.active()
+    return {"runs": runs.recent(), "active": live.id if live else None}
+
+
+@app.get("/api/activities/runs/{run_id}")
+async def api_activity_run(run_id: str, after: int = 0, u=Depends(user)):
+    """The log from `after` onwards, with the cursor to ask from next."""
+    run = runs.get(run_id)
+    if run is None:
+        # A run this server never had, or one already evicted. 404 rather than an
+        # empty log, so the panel stops polling instead of spinning forever.
+        raise HTTPException(404, "no run %r — it may have finished long ago" % run_id)
+    return runs.slice_events(run, after)
 
 
 # ------------------------------------------------------------------- settings

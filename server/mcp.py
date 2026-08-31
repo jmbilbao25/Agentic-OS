@@ -45,7 +45,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from . import authoring, config, search, vault
+from . import activities, authoring, config, search, vault
 from .authoring import WriteRefused
 
 log = logging.getLogger("agentos.mcp")
@@ -344,10 +344,49 @@ TOOLS: List[Dict] = [
             "text": _s(type="string", description="One line. Past tense, concrete."),
         }, required=["text"]),
     },
+    {
+        "name": "list_activities",
+        "description": (
+            "List the activities this second brain can run — the automation "
+            "recipes in config/activities/, each a named list of steps that the "
+            "Activities panel in the web UI shows as a button. Call before writing "
+            "one, both to avoid duplicating it and to see the step vocabulary in "
+            "use."),
+        "inputSchema": _s(type="object", properties={}),
+    },
+    {
+        "name": "write_activity",
+        "description": (
+            "Create an activity: a named, ordered recipe the user can run from a "
+            "button in the Activities panel, or from `bin/os activity <name>`. Use "
+            "when the user asks for an automation, a routine, a scheduled job, or "
+            "'make this a button'.\n\n"
+            "`steps` is an array of strings drawn ONLY from this vocabulary — "
+            "there is deliberately no way to run an arbitrary shell command, "
+            "because activities are composed from capabilities the server already "
+            "has:\n\n%s\n\n"
+            "Steps that take an argument are written 'verb: argument', for example "
+            "'research: retrieval augmented generation'. A good activity is 1-4 "
+            "steps in a meaningful order — capture before you distil. After "
+            "writing one, run it once with `bash bin/os activity <name>`: an "
+            "activity that has never executed is a guess." % activities.vocabulary()),
+        "inputSchema": _s(type="object", properties={
+            "name": _s(type="string",
+                       description="kebab-case, also the filename, e.g. 'fetch-ai-news'."),
+            "description": _s(type="string",
+                              description="What it does and when to press it. Shown on the button."),
+            "steps": _s(type="array", items=_s(type="string"),
+                        description="Ordered steps from the vocabulary above."),
+            "notes": _s(type="string",
+                        description="Optional prose for a human reading the file."),
+            "overwrite": _s(type="boolean", default=False,
+                            description="Replace an activity that already exists."),
+        }, required=["name", "description", "steps"]),
+    },
 ]
 
 _WRITE_TOOLS = {"create_note", "edit_note", "update_note", "delete_note", "log_journal",
-                "write_skill", "edit_skill"}
+                "write_skill", "edit_skill", "write_activity"}
 _BY_NAME = {t["name"]: t for t in TOOLS}
 
 
@@ -529,6 +568,38 @@ def _t_log_journal(args: Dict, _s: _Session) -> str:
     return _after_write(authoring.append_journal(text))
 
 
+def _t_list_activities(args: Dict, _s: _Session) -> str:
+    found = activities.load_all()
+    broken = activities.problems()
+    if not found and not broken:
+        return ("This brain has no activities yet. Write one with write_activity — "
+                "the step vocabulary is in that tool's description.")
+    payload = {"count": len(found),
+               "activities": [a.public() for a in found]}
+    # A file that exists but will not parse is the single most confusing state
+    # here: the panel shows nothing and the model assumes it was never written.
+    if broken:
+        payload["will_not_run"] = broken
+    return _pretty(payload)
+
+
+def _t_write_activity(args: Dict, _s: _Session) -> str:
+    steps = args.get("steps")
+    if steps is None:
+        raise WriteRefused(
+            "`steps` is required — it is the part that runs.\n\nAvailable steps:\n%s"
+            % activities.vocabulary())
+    if not isinstance(steps, (list, str)):
+        raise WriteRefused("`steps` must be an array of strings, for example "
+                           '["radar", "distill"].')
+    return _after_write(authoring.write_activity(
+        args.get("name") or "",
+        args.get("description") or "",
+        steps,
+        notes=args.get("notes") or "",
+        overwrite=bool(args.get("overwrite"))))
+
+
 _IMPL = {
     "search_vault": _t_search_vault,
     "read_note": _t_read_note,
@@ -543,6 +614,8 @@ _IMPL = {
     "list_skills": _t_list_skills,
     "write_skill": _t_write_skill,
     "edit_skill": _t_edit_skill,
+    "list_activities": _t_list_activities,
+    "write_activity": _t_write_activity,
 }
 
 

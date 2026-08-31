@@ -78,7 +78,7 @@ export class SettingsView {
       if (host) {
         const p = new ModelPicker(host, {
           value: values[f.key] || '',
-          blank: f.key.startsWith('GAUNTLET_') ? 'Use the main model' : '',
+          blank: '',
           onChange: (v) => this.change(f.key, v),
         });
         this.pickers.push(p);

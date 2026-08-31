@@ -7,7 +7,7 @@ The vault's own UI answers *"what do I know?"*. This answers *"do something with
 ## How it fits together
 
 ```
-browser ──► Caddy :443 ──► agentos :8000     the map, search, Ask, Gauntlet
+browser ──► Caddy :443 ──► agentos :8000     the map, search, Ask, Activities
                              (session cookie auth)
 
 browser ──► SSH tunnel ──► jm-harness :3080   the agent UI  (no auth of its own)

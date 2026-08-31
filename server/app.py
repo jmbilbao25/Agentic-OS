@@ -1,18 +1,25 @@
 """The visual second brain.
 
-The HTTP API is read-only over the vault: this app renders, searches and reasons
-over markdown, it never authors it. Writing is `bin/os`, so that every change to
-memory goes through git and stays reviewable. See brain/wiki/Git Is The Disk.md
+The HTTP API does not *author* markdown: no endpoint here composes a note from a
+request body. What it renders, searches and reasons over is written elsewhere, so
+that every change to memory goes through git and stays reviewable. See
+brain/wiki/Git Is The Disk.md
 
-Two exceptions, both deliberate:
+Three things do write, all deliberate, and the distinction that matters is that
+none of them takes note content from an HTTP caller:
 
   - settings.local.json is machine state rather than memory — it holds an API key
     and a model choice, neither of which belongs in a git history.
+  - `/api/run/{name}` and `/api/activities/run` execute the same automation
+    modules the systemd timers do. They write captures, digests and — via the
+    `doctor` step — wiki notes. The request chooses *which routine runs*, never
+    what it writes; the vocabulary of runnable steps is code, in
+    server/activities.py, and there is no step that runs an arbitrary command.
   - /mcp, when `AGENTOS_MCP_TOKEN` is set, exposes the vault to an external agent
     *including* write tools. It is a separate surface with separate auth (bearer
     token, loopback-only by default), it is absent entirely when unconfigured, and
     every write it performs is its own git commit. See server/mcp.py for the
-    threat model; the invariant above still holds for everything under /api/.
+    threat model.
 """
 import asyncio
 import json
@@ -28,7 +35,9 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import auth, config, embed, gauntlet, llm, mcp, search, settings, vault
+from . import (activities, auth, config, embed, llm, mcp, runs, search, settings,
+               vault)
+from .authoring import WriteRefused
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -152,14 +161,7 @@ async def status(u=Depends(user)):
             "orbit_spin": settings.get("UI_ORBIT_SPIN"),
             "label_density": settings.get("UI_LABEL_DENSITY"),
         },
-        "gauntlet": {
-            "builder": settings.get("GAUNTLET_BUILDER_MODEL")
-                       or settings.get("LLM_MODEL"),
-            "critic": settings.get("GAUNTLET_CRITIC_MODEL")
-                      or settings.get("LLM_MODEL"),
-            "ceiling": settings.get("GAUNTLET_MAX_ROUNDS"),
-        },
-        "problems": config.problems() + mcp.problems(),
+        "problems": config.problems() + mcp.problems() + activities.problems(),
         "mcp": {"enabled": MCP_MOUNTED,
                 "loopback_only": MCP_MOUNTED and not mcp.ALLOW_REMOTE,
                 "tools": len(mcp.TOOLS) if MCP_MOUNTED else 0},
@@ -267,55 +269,115 @@ async def api_ask(request: Request, u=Depends(user)):
     return _sse(gen())
 
 
-# ------------------------------------------------------------------ gauntlet
+# ---------------------------------------------------------------- activities
 
-@app.post("/api/gauntlet/bar")
-async def api_gauntlet_bar(payload: dict = Body(...), u=Depends(user)):
-    """Fetch a reference artifact so you can see what the critic will see.
+@app.get("/api/activities")
+async def api_activities(u=Depends(user)):
+    """Every activity, plus the step vocabulary the panel documents.
 
-    Separate from the run because a bar that turns out to be a JavaScript shell
-    should fail before you spend a builder round on it.
+    `will_not_run` carries files that exist but do not parse. A malformed activity
+    that silently vanished from the list was indistinguishable from one that was
+    never written, which sent people looking in the wrong place.
     """
-    url = (payload.get("url") or "").strip()
-    if not url:
-        raise HTTPException(400, "no url")
-    res = await gauntlet.fetch_bar(url)
-    if res.get("error"):
-        return JSONResponse({"error": res["error"]}, status_code=400)
-    text = res["text"]
-    return {"title": res["title"], "chars": len(text),
-            "preview": text[:1200], "text": text}
+    found = activities.load_all()
+    return {
+        "activities": [a.public() for a in found],
+        "steps": {verb: {"arg": v.arg, "summary": v.summary, "detail": v.detail,
+                         "writes": v.writes}
+                  for verb, v in activities.STEPS.items()},
+        "will_not_run": activities.problems(),
+        "llm_configured": llm.configured(),
+    }
 
 
-@app.post("/api/gauntlet")
-async def api_gauntlet(request: Request, u=Depends(user)):
+#: Live task handles. Held so the event loop cannot garbage-collect a run that
+#: nobody is currently awaiting — which is the normal state here, by design.
+_RUN_TASKS = set()
+
+
+async def _drive(run: runs.Run) -> None:
+    """Consume an activity's events into its run log. Never raises."""
+    ok, message = False, ""
+    try:
+        async for ev in activities.run(run.name):
+            runs.append(run, ev)
+            if ev.get("type") == "done":
+                ok = bool(ev.get("ok"))
+                message = ev.get("message", "")
+    except WriteRefused as e:
+        # A refusal is the activity being unrunnable, not a server fault, and its
+        # message names the fix — so it belongs in the log the panel renders.
+        runs.append(run, {"type": "error", "message": str(e)})
+        message = str(e)
+    except asyncio.CancelledError:
+        runs.append(run, {"type": "error", "message": "the run was cancelled"})
+        runs.finish(run, False, "cancelled")
+        raise
+    except Exception as e:                                  # noqa: BLE001
+        log.exception("activity %r failed", run.name)
+        runs.append(run, {"type": "error",
+                          "message": "%s: %s" % (type(e).__name__, e)})
+        message = "%s: %s" % (type(e).__name__, e)
+    finally:
+        if run.running:
+            runs.finish(run, ok, message)
+
+
+@app.post("/api/activities/run")
+async def api_activities_run(request: Request, u=Depends(user)):
+    """Start an activity in the background and answer with its run id.
+
+    Deliberately not a stream. The first version held one SSE response open for
+    the whole run, which works until the run is long: the doctor takes ~80 seconds
+    over three captures, a phone on cellular gave up at 50, and the user was shown
+    "network error" for a run the server went on to complete successfully. The
+    connection was the only thing that failed, and it was also the only thing
+    reporting.
+
+    So the run outlives its caller. Poll /api/activities/runs/{id} for the log —
+    a dropped connection, a lock screen or a page reload all become survivable,
+    and the feed rejoins from an offset instead of orphaning the work.
+    """
     body = await request.json()
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "no activity named")
 
-    async def gen():
-        bar_text = (body.get("bar") or "").strip()
-        bar_label = (body.get("bar_label") or "").strip() or "the reference"
+    # Refuse a second copy rather than running two. These steps write to the vault
+    # and commit; two radars racing would fight over the same dated capture.
+    busy = runs.active(name)
+    if busy is not None:
+        return {"run_id": busy.id, "name": name, "running": True,
+                "already_running": True}
 
-        url = (body.get("bar_url") or "").strip()
-        if url and not bar_text:
-            yield _frame("phase", {"phase": "fetching", "url": url})
-            got = await gauntlet.fetch_bar(url)
-            if got.get("error"):
-                yield _frame("error", {"type": "error", "message": got["error"]})
-                yield _frame("done", {"won": False})
-                return
-            bar_text = got["text"]
-            bar_label = got["title"] or url
-            yield _frame("bar", {"title": bar_label, "chars": len(bar_text)})
+    try:
+        activities.load(name)          # fail here, with the reason, not in the log
+    except WriteRefused as e:
+        raise HTTPException(400, str(e))
 
-        async for ev in gauntlet.run(
-                (body.get("goal") or ""), bar_text, bar_label=bar_label,
-                builder_model=(body.get("builder_model") or "").strip() or None,
-                critic_model=(body.get("critic_model") or "").strip() or None,
-                max_rounds=body.get("max_rounds") or None,
-                top_k=body.get("k") or None):
-            yield _frame(ev.get("type", "notice"), ev)
+    run = runs.start(name)
+    task = asyncio.create_task(_drive(run))
+    _RUN_TASKS.add(task)
+    task.add_done_callback(_RUN_TASKS.discard)
+    return {"run_id": run.id, "name": name, "running": True}
 
-    return _sse(gen())
+
+@app.get("/api/activities/runs")
+async def api_activity_runs(u=Depends(user)):
+    """Recent runs, newest first, plus whichever is live — so a reload can rejoin."""
+    live = runs.active()
+    return {"runs": runs.recent(), "active": live.id if live else None}
+
+
+@app.get("/api/activities/runs/{run_id}")
+async def api_activity_run(run_id: str, after: int = 0, u=Depends(user)):
+    """The log from `after` onwards, with the cursor to ask from next."""
+    run = runs.get(run_id)
+    if run is None:
+        # A run this server never had, or one already evicted. 404 rather than an
+        # empty log, so the panel stops polling instead of spinning forever.
+        raise HTTPException(404, "no run %r — it may have finished long ago" % run_id)
+    return runs.slice_events(run, after)
 
 
 # ------------------------------------------------------------------- settings

@@ -61,6 +61,6 @@ that prevents data loss. Security. Accessibility. Anything explicitly requested.
 
 And leave one runnable check behind. Non-trivial logic gets the smallest thing that
 fails if the logic breaks — an assert-based self-check in the module, no framework,
-no fixtures. `python -m server.settings`, `python -m server.gauntlet`,
+no fixtures. `python -m server.settings`, `python -m server.activities`, `python -m server.doctor`,
 `python -m server.passwd --selfcheck` are all exactly this. Trivial one-liners need
 no test.

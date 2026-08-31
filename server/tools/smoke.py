@@ -139,9 +139,11 @@ def main():
         @check("every API route refuses an unauthenticated caller")
         def _():
             gets = ["/api/status", "/api/graph", "/api/settings", "/api/models",
-                    "/api/search?q=x", "/api/doc?id=wiki/Ralph%20Loop"]
-            posts = ["/api/ask", "/api/gauntlet", "/api/reindex", "/api/sync",
-                     "/api/settings/reset", "/api/gauntlet/bar"]
+                    "/api/search?q=x", "/api/doc?id=wiki/Ralph%20Loop",
+                    "/api/activities", "/api/activities/runs",
+                    "/api/activities/runs/nope"]
+            posts = ["/api/ask", "/api/reindex", "/api/sync",
+                     "/api/settings/reset", "/api/activities/run"]
             for p in gets:
                 assert client.get(p).status_code == 401, "GET %s was not gated" % p
             for p in posts:
@@ -346,7 +348,7 @@ def main():
             s = client.get("/api/settings").json()
             assert len(s["schema"]) >= 25, len(s["schema"])
             groups = {g["id"] for g in s["groups"]}
-            assert {"inference", "gauntlet", "retrieval", "embeddings",
+            assert {"inference", "retrieval", "embeddings",
                     "interface"} <= groups, groups
             for f in s["schema"]:
                 assert f["label"], "%s has no label" % f["key"]
@@ -412,7 +414,7 @@ def main():
             assert "NOT_A_SETTING" in r.json()["errors"]
 
         # ------------------------------------------------------- inference
-        print("\ninference and gauntlet")
+        print("\ninference")
 
         @check("Ask streams sources and a usable error when no key is set")
         def _():
@@ -432,32 +434,84 @@ def main():
         def _():
             assert client.post("/api/ask", json={"q": "  "}).status_code == 400
 
-        @check("the gauntlet refuses a bar too thin to judge against")
-        def _():
-            events = sse(client, "/api/gauntlet",
-                         {"goal": "write something", "bar": "short"})
-            err = [d["message"] for e, d in events if e == "error"]
-            assert err, [e for e, _ in events]
-            assert "bar" in err[0].lower(), err[0]
+        # ------------------------------------------------------ activities
+        print("\nactivities")
 
-        @check("the gauntlet refuses a goal with no bar at all")
+        @check("the panel lists every activity with its resolved steps")
         def _():
-            events = sse(client, "/api/gauntlet", {"goal": "", "bar": "x" * 400})
-            assert any(e == "error" for e, _ in events), \
-                "an empty goal was accepted"
+            r = client.get("/api/activities")
+            assert r.status_code == 200, r.status_code
+            body = r.json()
+            names = {a["name"] for a in body["activities"]}
+            assert {"fetch-ai-news", "doctor"} <= names, names
+            assert not body["will_not_run"], body["will_not_run"]
+            news = next(a for a in body["activities"] if a["name"] == "fetch-ai-news")
+            assert [s["verb"] for s in news["steps"]] == ["radar", "distill"], news
+            assert "brain/raw/" in news["writes"], news["writes"]
+            return "%d activities, %d steps in the vocabulary" % (
+                len(names), len(body["steps"]))
 
-        @check("bar fetching refuses the local network")
+        @check("an unknown activity is refused before a run is created")
         def _():
-            blocked = ["http://127.0.0.1:8000/healthz", "http://10.0.0.1/",
-                       "http://169.254.169.254/latest/meta-data/",
-                       "http://192.168.0.1/", "http://[::1]/",
-                       "file:///etc/passwd", "gopher://x/"]
-            for u in blocked:
-                r = client.post("/api/gauntlet/bar", json={"url": u})
-                assert r.status_code == 400, \
-                    "%s was not refused (%d) — the server is an open proxy" % (
-                        u, r.status_code)
-            return "%d addresses" % len(blocked)
+            r = client.post("/api/activities/run", json={"name": "does-not-exist"})
+            assert r.status_code == 400, r.status_code
+            # The refusal has to name what does exist, or the only way to discover
+            # the real names is to read the filesystem.
+            assert "fetch-ai-news" in r.json()["error"], r.json()
+
+        @check("a run outlives the request that started it")
+        def _():
+            r = client.post("/api/activities/run", json={"name": "doctor"})
+            assert r.status_code == 200, r.text
+            rid = r.json()["run_id"]
+            assert r.json()["running"] is True, r.json()
+
+            # The log is addressable immediately, by id, from a second request —
+            # which is the property that makes a dropped connection survivable.
+            got = client.get("/api/activities/runs/%s" % rid)
+            assert got.status_code == 200, got.text
+            body = got.json()
+            assert body["run_id"] == rid and body["name"] == "doctor", body
+            assert "next" in body and isinstance(body["events"], list), body
+
+            listed = client.get("/api/activities/runs").json()
+            assert any(x["run_id"] == rid for x in listed["runs"]), listed
+            return "run %s addressable after the POST returned" % rid
+
+        @check("a cursor never replays or skips an event")
+        def _():
+            rid = client.post("/api/activities/run",
+                              json={"name": "doctor"}).json()["run_id"]
+            first = client.get("/api/activities/runs/%s?after=0" % rid).json()
+            again = client.get("/api/activities/runs/%s?after=%d"
+                               % (rid, first["next"])).json()
+            assert again["next"] >= first["next"], (first, again)
+            for ev in again["events"]:
+                assert ev not in first["events"], "event replayed across the cursor"
+
+        @check("an unknown run id is a 404, so the panel stops polling")
+        def _():
+            assert client.get("/api/activities/runs/deadbeef").status_code == 404
+
+        @check("running an activity needs a name")
+        def _():
+            assert client.post("/api/activities/run", json={}).status_code == 400
+
+        @check("no activity can name a shell command")
+        def _():
+            from server import activities as act
+            from server.authoring import WriteRefused
+            assert "shell" not in act.STEPS, \
+                "a shell verb exists — brain/raw/ is untrusted input"
+            body = ("---\nname: x\ndescription: %s\n---\n\n## Steps\n\n- shell: id\n"
+                    % ("d" * 40))
+            for step in ("- shell: id", "- bash: id", "- run: rm -rf /", "- eval: x"):
+                try:
+                    act.parse(body.replace("- shell: id", step), "x")
+                except WriteRefused:
+                    continue
+                raise AssertionError("%r was accepted as a step" % step)
+            return "4 injection shapes refused"
 
         @check("the model catalogue normalises whatever the provider returns")
         def _():

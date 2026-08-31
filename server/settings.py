@@ -119,22 +119,6 @@ SCHEMA = [
       group="inference", label="System prompt",
       help="The instruction wrapped around every retrieval answer."),
 
-    # -------------------------------------------------------------- gauntlet
-    F("GAUNTLET_BUILDER_MODEL", "model", "",
-      group="gauntlet", label="Builder model",
-      help="Blank uses the main model. A strong model earns its cost here."),
-    F("GAUNTLET_CRITIC_MODEL", "model", "",
-      group="gauntlet", label="Critic model",
-      help="Blank uses the main model. A *different* model from the builder is "
-           "the point — a model grading its own output grades generously."),
-    F("GAUNTLET_MAX_ROUNDS", "int", 4, lo=1, hi=12,
-      group="gauntlet", label="Round ceiling",
-      help="A safety stop, not the exit. The real exit is the critic picking "
-           "ours blind."),
-    F("GAUNTLET_TEMPERATURE", "float", 0.7, lo=0.0, hi=2.0, step=0.05,
-      group="gauntlet", label="Builder temperature",
-      help="Higher than Ask on purpose: the builder is generating, not reciting."),
-
     # ------------------------------------------------------------- retrieval
     #
     # The fusion weights below are the values tools/eval_retrieval.py measured as
@@ -218,8 +202,6 @@ BY_KEY = {f.key: f for f in SCHEMA}
 GROUPS = [
     ("inference", "Inference",
      "Where answers come from, and which model writes them."),
-    ("gauntlet", "Gauntlet loop",
-     "Builder and critic. Keep them different models."),
     ("retrieval", "Retrieval",
      "How the two rankings get fused. Re-run the eval after changing these."),
     ("embeddings", "Embeddings",
@@ -485,8 +467,8 @@ def problems():
     """Config issues worth showing in the UI rather than failing silently."""
     out = []
     if not get("LLM_API_KEY"):
-        out.append("No inference key — search works, Ask and Gauntlet will not. "
-                   "Add one in Settings.")
+        out.append("No inference key — search works, but Ask and the activities "
+                   "that reason (distill, doctor) will not. Add one in Settings.")
     if get("EMBED_ENABLED") and get("EMBED_DIM") not in (384, 512, 768, 1024):
         out.append("EMBED_DIM %s is unusual — confirm it matches %s"
                    % (get("EMBED_DIM"), get("EMBED_MODEL")))

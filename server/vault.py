@@ -26,6 +26,9 @@ RING = {
     "decisions": "memory",
     "output": "applications",
     "loops": "routines",
+    # An activity is a routine that runs, so it sits with loops rather than with
+    # skills: a skill is knowledge about how to act, an activity is the acting.
+    "activities": "routines",
     "skills": "skills",
     "config": "skills",
 }
@@ -127,6 +130,17 @@ def load_system() -> List[Doc]:
             d.fm["files"] = ", ".join(p.stem for p in kids)
             d.body += "\n\n## Reference files\n\n" + "\n".join(
                 "### %s\n\n%s" % (p.name, _read(p, "skills").body) for p in kids)
+        out.append(d)
+
+    # Activities are on the map for the same reason skills are: an ARMS view that
+    # shows what this brain knows but not what it can run is half a picture. They
+    # are also openable, which is how you read a recipe before pressing it.
+    for act in sorted((root / "config" / "activities").glob("*.md")):
+        if act.name == "README.md":
+            continue
+        d = _read(act, "activities", id_override="activities/%s" % act.stem)
+        d.ring = "routines"
+        d.title = d.fm.get("name") or act.stem
         out.append(d)
 
     # Steering and the portable kernel only — the top level of config/ plus

@@ -66,6 +66,13 @@ CORE_FILES = {"core/STATE": "STATE.md", "core/lessons": "lessons.md"}
 #: what it can do.
 SKILLS_DIR = "config/skills"
 
+#: The second such place, and the same argument. An activity is a recipe made of
+#: capabilities this server already has — see the whitelist in server/activities.py
+#: — so writing one grants no power that running the automations did not already
+#: grant. What makes it safe to hand to a model is that the *vocabulary* is code
+#: and only the composition is data.
+ACTIVITIES_DIR = "config/activities"
+
 #: A skill directory name, and the `name:` in its frontmatter, must match this and
 #: each other. `bin/os selftest` enforces the same rule, so a skill authored here is
 #: valid by the OS's own check rather than merely by ours.
@@ -559,6 +566,114 @@ def edit_skill(name: str, find: str, replace: str, *, file: str = "SKILL",
         out = {"action": "edit_skill", "name": name, "path": rel(p),
                "replacements": hits if not count else min(hits, count)}
         out["git"] = commit_paths([p], "skills: edit %s" % name) if commit else {
+            "committed": False, "reason": "not requested"}
+        return out
+
+
+# ------------------------------------------------------------- activities
+
+def _activities_root() -> Path:
+    """`<repo>/config/activities`, resolved. The jail for every activity write."""
+    return (config.ROOT / ACTIVITIES_DIR).resolve()
+
+
+def _activity_jail(p: Path) -> Path:
+    """Prove `p` is inside config/activities. Same shape as `_skill_jail`.
+
+    A third jail rather than a widened second one, for the reason given there: a
+    function guarding two trees fails silently in one direction.
+    """
+    root = _activities_root()
+    full = Path(p).resolve()
+    if root != full.parent:
+        raise WriteRefused("Refusing to write outside %s: %s" % (ACTIVITIES_DIR, p))
+    if full.suffix.lower() != ".md":
+        raise WriteRefused("Activities are markdown: %s" % full.name)
+    return full
+
+
+def _activity_title(name: str) -> str:
+    """`fetch-ai-news` -> `Fetch ai news`. A heading, not a slug."""
+    words = name.replace("-", " ").strip()
+    return words[:1].upper() + words[1:] if words else name
+
+
+def write_activity(name: str, description: str, steps: List[str], *,
+                   notes: str = "", overwrite: bool = False,
+                   commit: bool = True) -> Dict:
+    """Create or replace `config/activities/<name>.md`.
+
+    `steps` is a list of strings rather than a body of markdown on purpose. The
+    caller is often a small model, and asking it for `["radar", "distill"]` is a
+    far smaller ask than asking it to compose a file with a correctly-spelled
+    `## Steps` section in the right place. The markdown is generated here, so the
+    on-disk format stays the one thing a human reads and edits.
+
+    Validation runs through `activities.parse()` — the same parser the runner uses
+    — against the generated text. Validating the arguments separately would let the
+    two drift, and the failure mode of that drift is an activity that writes
+    cleanly and then refuses to run.
+    """
+    from . import activities                  # lazy: activities imports WriteRefused
+
+    name = activities.check_name(name)
+    description = " ".join((description or "").split())
+    if isinstance(steps, str):               # a model that sent one step, not a list
+        steps = [steps]
+    if not steps or not isinstance(steps, list):
+        raise WriteRefused(
+            "An activity needs a `steps` list — that is the part that runs.\n\n"
+            "Available steps:\n%s" % activities.vocabulary())
+
+    clean = [" ".join(str(s).split()) for s in steps]
+    clean = [s for s in clean if s]
+    if not clean:
+        raise WriteRefused("Every step was empty.\n\nAvailable steps:\n%s"
+                           % activities.vocabulary())
+
+    body = "# %s\n" % _activity_title(name)
+    if (notes or "").strip():
+        body += "\n%s\n" % notes.strip()
+    body += "\n## Steps\n\n" + "\n".join("- %s" % s for s in clean) + "\n"
+    text = "---\nname: %s\ndescription: %s\n---\n\n%s" % (name, description, body)
+
+    # Parse what will actually be on disk. Raises WriteRefused with the step
+    # vocabulary attached, which is what lets a model fix itself on the next call.
+    activities.parse(text, name)
+
+    with _LOCK:
+        root = _activities_root()
+        root.mkdir(parents=True, exist_ok=True)
+        p = _activity_jail(root / ("%s.md" % name))
+        if p.exists() and not overwrite:
+            raise WriteRefused(
+                "The activity %r already exists. Pass overwrite to replace it, or "
+                "read it first and edit the file." % name)
+        _atomic_write(p, text)
+        out = {
+            "action": "write_activity",
+            "name": name,
+            "id": "activities/%s" % name,
+            "path": rel(p),
+            "steps": clean,
+        }
+        out["git"] = commit_paths([p], "activities: add %s" % name) if commit else {
+            "committed": False, "reason": "not requested"}
+        return out
+
+
+def delete_activity(name: str, *, commit: bool = True) -> Dict:
+    """Remove an activity. Recoverable from git like any other deletion."""
+    from . import activities
+
+    name = activities.check_name(name)
+    with _LOCK:
+        p = _activity_jail(_activities_root() / ("%s.md" % name))
+        if not p.exists():
+            raise WriteRefused("No activity called %r." % name)
+        p.unlink()
+        out = {"action": "delete_activity", "name": name, "path": rel(p)}
+        out["git"] = commit_paths([p], "activities: remove %s" % name) if commit else {
             "committed": False, "reason": "not requested"}
         return out
 

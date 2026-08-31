@@ -268,6 +268,23 @@ llm-pi-ai:
       # deploy/harness/harness.env (gitignored) and never enters this file.
       apiKeyEnv: GEMINI_API_KEY
 
+      # ── AI STUDIO ids below; VERTEX needs a different shape ─────────────
+      #
+      # The ids here (`gemini-3.6-flash`) are correct for the shim's default
+      # AI Studio backend. If you switch the shim to Vertex — which you may have
+      # to, because AI Studio would not serve gemini-3.7-flash at all — then
+      # EVERY id in this route must become `<publisher>/<model>`:
+      #
+      #     - id: google/gemini-3.7-flash
+      #
+      # and `agent-default-model` below must match. Vertex rejects a bare id with
+      # 400 "Malformed publisher model ... expected '<publisher>/<model>'". Vertex
+      # also carries different models per location: gemini-3.7-flash exists only
+      # at locations/global on the project this was tested against, while
+      # us-central1 served gemini-2.5-flash and 404'd on 3.7 and 3.6.
+      #
+      # See deploy/harness/gemini-shim/README.md for the backend switch and the
+      # security tradeoff it carries.
       # Availability sweep 2026-08-30, same key, same minute:
       #   gemini-3.7-flash       503 "experiencing high demand", then timed out
       #   gemini-3.6-flash       200

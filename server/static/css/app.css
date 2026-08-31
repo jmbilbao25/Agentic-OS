@@ -164,6 +164,13 @@ svg { display: block; }
 #stage {
   position: fixed; inset: 0; display: block;
   width: 100vw; height: 100vh;
+  /* dvh, with the vh above left in place as the fallback. On iOS Safari and
+     Chrome Android the collapsing URL bar makes 100vh TALLER than the visible
+     viewport, so the bottom of the map sat permanently under browser chrome —
+     and because resize() sizes the canvas from this box, the scene's centre was
+     off by half the difference, which is why the map never looked centred on a
+     phone. dvh tracks the viewport as the bar collapses. */
+  height: 100dvh;
   cursor: grab;
   touch-action: none;
 }
@@ -1087,15 +1094,32 @@ body.auth {
   .rail { width: 176px; }
 }
 
+/* The viewport meta already carries viewport-fit=cover, which is what lets the
+   canvas run edge to edge behind a notch — but nothing was reclaiming the insets,
+   so on a notched phone the topbar ran under the notch and the bottom sheet's
+   footer under the home indicator. env() resolves to 0px everywhere else, so
+   these cost nothing on hardware that has no cutouts. */
+.topbar {
+  padding-top: max(var(--s3), env(safe-area-inset-top));
+  padding-left: max(var(--s4), env(safe-area-inset-left));
+  padding-right: max(var(--s4), env(safe-area-inset-right));
+}
+
 @media (max-width: 900px) {
   /* The dock becomes a bottom sheet: on a phone the map wants the full width,
      and a right-hand panel at 100vw hides it completely anyway. */
   .dock, .dock.wide {
     top: auto; left: 0; right: 0; bottom: 0; width: auto;
     height: 76vh; max-height: 76vh;
+    /* dvh for the same reason as #stage: with vh the sheet was taller than the
+       visible viewport and its footer — where Send and Save live — sat under the
+       URL bar. */
+    height: 76dvh; max-height: 76dvh;
     border-left: 0; border-top: 1px solid var(--line-1);
     border-radius: var(--r-lg) var(--r-lg) 0 0;
     transform: translateY(100%);
+    /* Keep the footer clear of the home indicator. */
+    padding-bottom: env(safe-area-inset-bottom);
   }
   .dock.open { transform: none; }
   .dock-grip { display: none; }
@@ -1109,8 +1133,9 @@ body.auth {
   .topbar .btn { padding: 8px; }
   .topbar .btn .lbl, .topbar .btn kbd { display: none; }
   .brand span { display: none; }
-  .palette { top: 0; left: 0; width: 100vw; max-height: 100vh; height: 100%;
-    border-radius: 0; transform: translateY(-8px); }
+  .palette { top: 0; left: 0; width: 100vw; max-height: 100dvh; height: 100%;
+    border-radius: 0; transform: translateY(-8px);
+    padding-top: env(safe-area-inset-top); }
   .palette.open { transform: none; }
   .view-body { padding: var(--s4); }
   .notices { left: var(--s3); right: var(--s3); max-width: none; }

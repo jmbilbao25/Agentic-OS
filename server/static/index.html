@@ -122,10 +122,14 @@
     <svg class="i" aria-hidden="true"><use href="#i-ask"/></svg>
     <span class="lbl">Ask</span> <kbd>A</kbd>
   </button>
-  <button class="btn" data-act="activities">
-    <svg class="i" aria-hidden="true"><use href="#i-activities"/></svg>
-    <span class="lbl">Activities</span> <kbd>E</kbd>
-  </button>
+  <!-- The Activities topbar button was removed deliberately; the feature is not.
+       It had three other entry points already — the dock tab below, the `E`
+       shortcut, and the command palette — so the button was the fourth way to
+       reach one view, and it was the one costing the most. The topbar comment in
+       app.css notes that four labelled buttons plus the brand do not fit in
+       390px, which is why they collapse to bare icons on a phone; dropping this
+       one buys the remaining three their labels back. Re-add by restoring this
+       block and the `case 'activities'` arm in app.js's click switch. -->
   <button class="btn btn-icon" data-act="settings" title="Settings (,)"
           aria-label="Settings">
     <svg class="i" aria-hidden="true"><use href="#i-settings"/></svg>

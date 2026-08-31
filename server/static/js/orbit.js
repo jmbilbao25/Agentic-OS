@@ -416,6 +416,9 @@ export class Orbit {
     // unlaid-out canvas reports its 300x150 intrinsic default, which would put
     // the centre of the scene in the top-left corner.
     const r = this.cv.getBoundingClientRect();
+    // Same rect the pointer path needs, measured here anyway. Refresh the cache
+    // rather than invalidating it, so the next pointermove costs nothing.
+    this._rect = r;
     const w = Math.round(r.width) || window.innerWidth;
     const h = Math.round(r.height) || window.innerHeight;
     this.cv.width = Math.max(1, Math.round(w * this.dpr));
@@ -477,6 +480,13 @@ export class Orbit {
     window.addEventListener('load', () => this.resize(), { once: true });
     if (document.fonts?.ready) document.fonts.ready.then(() => this.resize());
 
+    this._run();
+  }
+
+  /* The loop itself, separated from start() so it can be restarted after a
+     visibilitychange stop without re-running the one-time measurement setup or
+     re-registering the load and fonts.ready listeners. */
+  _run() {
     const loop = (t) => {
       const dt = Math.min((t - this._t0) / 1000, 0.05);
       this._t0 = t;
@@ -516,7 +526,13 @@ export class Orbit {
     this._raf = requestAnimationFrame(loop);
   }
 
-  stop() { if (this._raf) cancelAnimationFrame(this._raf); }
+  /* Nulls _raf as well as cancelling it, so "is the loop running?" is answerable.
+     Without that, the visibilitychange handler could not tell a stopped loop from
+     a running one and would stack a second one on every tab return. */
+  stop() {
+    if (this._raf) cancelAnimationFrame(this._raf);
+    this._raf = null;
+  }
 
   draw() {
     const g = this.ctx;
@@ -893,7 +909,11 @@ export class Orbit {
     let pinch = null;
 
     const local = (e) => {
-      const r = cv.getBoundingClientRect();
+      // This used to call getBoundingClientRect() on every pointermove — a forced
+      // layout read per mouse event, and pointer events fire faster than frames.
+      // The canvas is position:fixed and fills the viewport, so its rect only
+      // moves when the window does; resize() drops the cache.
+      const r = this._rect || (this._rect = cv.getBoundingClientRect());
       return { x: e.clientX - r.left, y: e.clientY - r.top };
     };
 
@@ -909,13 +929,24 @@ export class Orbit {
         this.view.y = this.cam.y;
         return;
       }
-      const hit = this.at(x, y);
-      const id = hit ? hit.id : null;
-      if (id !== this.hover) {
-        this.hover = id;
-        this.onHover(hit, e.clientX, e.clientY);
-      }
-      cv.classList.toggle('picking', !!hit);
+      // at() is a linear scan over every node. Resolving it per event meant doing
+      // that scan several times between frames and throwing most of the answers
+      // away. Keep the latest position, resolve it once per frame — the hover
+      // highlight cannot render faster than a frame anyway.
+      this._hoverAt = { x, y, cx: e.clientX, cy: e.clientY };
+      if (this._hoverRaf) return;
+      this._hoverRaf = requestAnimationFrame(() => {
+        this._hoverRaf = null;
+        const p = this._hoverAt;
+        if (!p) return;
+        const hit = this.at(p.x, p.y);
+        const id = hit ? hit.id : null;
+        if (id !== this.hover) {
+          this.hover = id;
+          this.onHover(hit, p.cx, p.cy);
+        }
+        cv.classList.toggle('picking', !!hit);
+      });
     });
 
     cv.addEventListener('pointerdown', (e) => {
@@ -992,7 +1023,33 @@ export class Orbit {
     cv.addEventListener('pointerup', drop);
     cv.addEventListener('pointercancel', drop);
 
-    window.addEventListener('resize', () => this.resize());
+    // resize() re-runs the whole layout engine — the timeline layout sorts every
+    // node and rebuilds its lane map. A window drag fires this continuously, and
+    // app.js has a second resize listener that can trigger _layout() again
+    // through setInsets(), so an unthrottled drag ran the layout engine twice per
+    // event. Coalesce to one run per frame; the frame is the soonest the result
+    // could be seen.
+    window.addEventListener('resize', () => {
+      if (this._resizeRaf) return;
+      this._resizeRaf = requestAnimationFrame(() => {
+        this._resizeRaf = null;
+        this.resize();
+      });
+    });
+
+    // A hidden tab still ran the full render loop: ~20k arc fills a frame for a
+    // map nobody is looking at, which on a laptop is measurable battery. Nothing
+    // in the scene is time-critical, so stop the loop outright and restart it on
+    // return. _t0 is reset by start() via the dt clamp, so returning after an
+    // hour does not jump the spin.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        this.stop();
+      } else if (this._raf === null) {
+        this._t0 = performance.now();
+        this._run();
+      }
+    });
 
     window.matchMedia?.('(prefers-reduced-motion: reduce)')
       .addEventListener?.('change', (e) => { this.reducedMotion = e.matches; });

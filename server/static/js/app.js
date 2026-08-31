@@ -558,7 +558,9 @@ document.addEventListener('click', (e) => {
   switch (t.dataset.act) {
     case 'palette': palette.toggle(); break;
     case 'ask': openTab('ask'); askView.focus(); break;
-    case 'activities': openTab('activities'); break;
+    // No `case 'activities'` — the topbar button that dispatched it is gone. The
+    // view is still reached by its dock tab, the `E` key, and the palette command,
+    // none of which route through data-act. Left out rather than kept dead.
     case 'settings': openTab('settings'); break;
     case 'close-dock': closeDock(); break;
     case 'ask-send': askView.ask().catch(handle); break;

@@ -26,6 +26,37 @@ Environment=SHIM_PORT=8787
 # stays inside the harness process, where pi-ai's `apiKeyEnv` seam owns it, and
 # reaches Gemini as a forwarded header. A shim holding its own copy would be a
 # second place for the secret to leak from for no operational gain.
+#
+# ── Vertex mode (optional, and it costs you the property above) ──────────────
+#
+# AI Studio would not serve gemini-3.7-flash — 503 then timeouts, for hours.
+# Vertex served it first try at locations/global. To switch backends, add a
+# drop-in rather than editing this file:
+#
+#   sudo systemctl edit gemini-shim
+#   [Service]
+#   Environment=VERTEX_PROJECT=your-project-id
+#   Environment=VERTEX_LOCATION=global
+#   Environment=VERTEX_SA_JSON=/home/ec2-user/.dsh-harness/vertex-sa.json
+#   ReadOnlyPaths=/home/ec2-user/.dsh-harness/vertex-sa.json
+#
+# Read this before you do. Vertex authenticates with a short-lived OAuth token
+# minted from a service-account private key, and pi-ai's apiKeyEnv can only carry
+# a static string, so the shim must hold the credential itself — which is exactly
+# what the paragraph above was written to prevent, and a service-account key is
+# worse to hold than an API key because it is an identity rather than a scoped
+# token. Mitigate it properly:
+#
+#   * keep the file mode 600 and OUTSIDE the repo. `.gitignore` does not cover
+#     *.json, so a service-account file inside Agentic-OS is one `git add -A`
+#     away from being public. ~/.dsh-harness/ is already outside it.
+#   * give the service account roles/aiplatform.user and nothing more.
+#   * better still, mint out-of-process: a systemd timer writing a fresh token
+#     every 45 minutes plus Environment=VERTEX_TOKEN_FILE=/path leaves the shim
+#     holding only an expiring derived token, never the private key.
+#
+# Model ids change too: Vertex requires '<publisher>/<model>', so the settings.yaml
+# route needs `google/gemini-3.7-flash`. A bare id is rejected with 400.
 
 ExecStart=/usr/bin/python3 /home/ec2-user/Agentic-OS/deploy/harness/gemini-shim/shim.py
 

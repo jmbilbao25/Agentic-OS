@@ -1,7 +1,12 @@
 # DSH user settings for the JM Agentic-OS Harness.
 #
-# Install to $DSH_HOME/settings.yaml (default ~/.dsh/settings.yaml). Hot-reloaded:
-# editing it takes effect on the next request, with no restart.
+# Install to $DSH_HOME/settings.yaml. DSH's own default for DSH_HOME is ~/.dsh,
+# but deploy/systemd/jm-harness.service overrides it to ~/.dsh-harness so the
+# harness's state cannot collide with an interactive `dsh` run by the same user —
+# so on a deployed box the live file is ~/.dsh-harness/settings.yaml. Check
+# `systemctl show jm-harness -p Environment` before going looking for it.
+#
+# Hot-reloaded: editing it takes effect on the next request, with no restart.
 #
 # Why this file exists separately from the cordis patch: which LLM *adapters* are
 # mounted is composition (the patch), but which *providers* actually run is user
@@ -9,6 +14,28 @@
 # the moment this section supplies profiles. This is also exactly what the web
 # Models page writes, so anything set here can be changed from the UI later.
 
+# ─────────────────────────────────────────────────────────────────────────────
+# EVERY ROUTE LISTED BELOW NEEDS ITS KEY PRESENT, INCLUDING ONES YOU NEVER USE.
+#
+# pi-ai resolves each route's `apiKeyEnv` at STARTUP, not on first use, and one
+# unresolved variable aborts the whole harness rather than disabling that single
+# route:
+#
+#   dsh: MISSING_CREDENTIAL: llm-pi-ai: no credential for provider route
+#        "orcarouter"; its profile resolves ORCAROUTER_API_KEY, which is not set
+#
+# The agent does not start. Not degraded — absent. And `dsh --dump-config` will
+# NOT catch it: that command resolves the cordis overlay only and never reads this
+# file's provider block, so it exits 0 on a config that cannot boot.
+#
+# So if you have only an OpenRouter key, delete the `orcarouter` and `gemini`
+# blocks rather than leaving them in place unconfigured. The three variables this
+# file expects, all read by the unit via EnvironmentFile:
+#
+#   OPENROUTER_API_KEY   server/.env
+#   ORCAROUTER_API_KEY   server/.env
+#   GEMINI_API_KEY       deploy/harness/harness.env
+# ─────────────────────────────────────────────────────────────────────────────
 llm-pi-ai:
   providers:
     # The route key IS the provider name referenced by `agent-default-model` in
@@ -30,12 +57,18 @@ llm-pi-ai:
         - id: z-ai/glm-5.3-flash
           name: GLM 5.3 Flash
           contextWindow: 1310720
-          # Deliberately far below the model's ceiling. Configuring maxTokens also
-          # makes it this model's per-request default, and a default of "as much
-          # as possible" invites a single answer that costs minutes and fills the
-          # context window.
-          maxTokens: 32768
-          input: [text, image]
+          # 8192, and the number matters for billing, not just for taste.
+          #
+          # Configuring maxTokens makes it this model's per-request default, and
+          # OpenRouter reserves `input_cost + maxTokens x output_price` BEFORE
+          # running the request. At 32768 that reservation exceeded a small
+          # balance and every turn failed with
+          #   402 — "requires more credits, or fewer max_tokens. You requested up
+          #          to 32768 tokens, but can only afford 14617"
+          # while the turn itself would have cost a third of that. A ceiling you
+          # never reach is still a ceiling you pay to reserve.
+          maxTokens: 8192
+          input: [ text, image ]
 
         # Free, 256k context, supports tool calling — and rate-limited upstream
         # often enough to fail the first message of a session. Kept because when
@@ -44,16 +77,283 @@ llm-pi-ai:
         - id: z-ai/glm-5.2:free
           name: GLM 5.2 (free — rate-limits)
           contextWindow: 256000
-          maxTokens: 16384
+          maxTokens: 8192
 
         # Full GLM 5.2 for work that warrants it. ~16x the price of Flash.
         - id: z-ai/glm-5.2
           name: GLM 5.2
           contextWindow: 1048576
-          maxTokens: 32768
+          maxTokens: 8192
+
+        # Verified live 2026-08-30 against this deployment's key: volunteers tool
+        # calls unprompted (not just when tool_choice forces one), which is what
+        # the PLAN/RESEARCH/EXECUTE loop actually needs. $0.065/M prompt — 13%
+        # under Flash. Text-only input, so Flash stays the default for anything
+        # involving a screenshot or an image.
+        - id: deepseek/deepseek-v4-flash-0731
+          name: DeepSeek V4 Flash
+          contextWindow: 1310720
+          maxTokens: 8192
+
+        # Escalation only, never the default: ~19x Flash's input price. For
+        # architecture, gnarly refactors, and long reasoning chains where Flash
+        # visibly fumbles. Verified tool-calling. Text-only input.
+        - id: z-ai/glm-5.3
+          name: GLM 5.3 (escalation — 19x Flash)
+          contextWindow: 1310720
+          maxTokens: 8192
+
+        # ── free routes, verified live 2026-08-30 ───────────────────────────────
+        # Every entry below was tested twice against this deployment's key: once
+        # unforced (does it VOLUNTEER a tool call?) and once fed a completed tool
+        # result (does it synthesise, or re-call and loop?). Catalog metadata was
+        # not trusted — several models advertising `tools` failed one or both.
+        #
+        # HARD LIMIT: all :free models share one quota of 50 requests/day on this
+        # account (20/min), rising to 1000/day only after a one-time $10 credit
+        # purchase. One agent task burns 5-15 requests. Treat these as a fallback
+        # for when credits run dry, not as the daily driver.
+        #
+        # Because that quota is account-wide rather than per-model, listing more
+        # free routes here buys resilience against a single model being throttled
+        # and none whatsoever against the daily ceiling. The orcarouter route
+        # below exists for that: a different vendor is a different bucket.
+        #
+        # Rejected, with reasons — do not re-add without retesting:
+        #   dots-studio/dots-3-note-preview:free  200 but EMPTY content
+        #   google/gemma-4-31b-it:free            429 (also -26b-a4b)
+        #   z-ai/glm-5.2:free                     429 on 3/3 tries
+        #   thinkingmachines/inkling{,-small}:free 403, gated to registered apps
+        #   minimax/minimax-m3:free               will not volunteer a tool call
+        #   cohere/north-mini-code:free           will not volunteer a tool call
+        #   liquid/lfm-2.5-2.6b:free              2.6B / 65K, too weak to trust
+
+        # Best free pick. Volunteered a tool call unprompted AND synthesised the tool
+        # result cleanly. Largest context of any working free model.
+        - id: nvidia/nemotron-3.5-lightning:free
+          name: Nemotron 3.5 Lightning (free)
+          contextWindow: 1000000
+          maxTokens: 8192
+
+        # Strongest free model here (550B MoE). Round-trips tool results well, but did
+        # not volunteer a call on the first probe — slightly less eager than Lightning,
+        # so prefer it for reasoning over autonomous tool use.
+        - id: nvidia/nemotron-3-ultra-550b-a55b:free
+          name: Nemotron 3 Ultra 550B (free)
+          contextWindow: 1000000
+          maxTokens: 8192
+
+        # Volunteers tool calls; a reasoning model, so it spends output budget thinking.
+        # Raise maxTokens if answers arrive truncated.
+        - id: nvidia/nemotron-3-super-120b-a12b:free
+          name: Nemotron 3 Super 120B (free)
+          contextWindow: 262144
+          maxTokens: 8192
+
+        # Non-NVIDIA fallback so a single vendor outage does not take out every free
+        # route. Volunteers calls, clean round-trip.
+        - id: minimax/minimax-m2.7:free
+          name: MiniMax M2.7 (free)
+          contextWindow: 196608
+          maxTokens: 8192
+
+        # Code-oriented. Volunteers calls, clean round-trip. Good for the application
+        # and automation work; weaker as a general daily driver.
+        - id: poolside/laguna-s-2.1:free
+          name: Laguna S 2.1 (free — code)
+          contextWindow: 262144
+          maxTokens: 8192
 
       # Attribution headers. OpenRouter uses these for its rankings page and, more
       # usefully, they make this deployment identifiable in your own usage log.
       headers:
         HTTP-Referer: https://github.com/jmbilbao25/Agentic-OS
         X-Title: JM Agentic-OS Harness
+
+    # ── OrcaRouter — a second vendor, so a second free quota ────────────────
+    #
+    # Exists for exactly one reason: OpenRouter's free ceiling is account-wide, so
+    # no amount of model-juggling inside that route survives the day's 50th
+    # request. OrcaRouter is a different account with a different bucket, which is
+    # the only kind of fallback that helps once the daily cap is the thing that
+    # broke. OpenAI-compatible, so it needs no adapter work — same three settings.
+    #
+    # Verified 2026-08-30 against this deployment's key. What the balance endpoint
+    # says matters more than the catalog here: GET /v1/balance reported
+    # paid_balance 0, and on a zero balance most of this vendor's catalog is
+    # credit-gated. Tested, with results:
+    #
+    #   deepseek/deepseek-v4-flash-free   200 x3, volunteers a tool call unprompted,
+    #                                     synthesises the tool result cleanly. KEPT.
+    #   orcarouter/free                   200, then 402 free_quota_exhausted, then
+    #                                     200 again — a rolling window with no
+    #                                     published size and no ratelimit headers
+    #                                     to plan against. KEPT, but second.
+    #   orcarouter/auto                   402, needs $0.0005. Credit-gated.
+    #   orcarouter/fusion-flash           500 "parallel ensemble produced no
+    #                                     servable response" on a zero balance.
+    #   orcarouter/fusion, fusion-mini    same ensemble family, same gate.
+    #   orca/dub                          402. Also: it is a video dubbing model,
+    #                                     video->video at $0.60/minute. The $6 of
+    #                                     "free credit" on this account is locked
+    #                                     to it and is not spendable here.
+    #
+    # Do not add the credit-gated ids back on the strength of the catalog listing
+    # them — a route that 402s is worse than an absent one, because the harness
+    # will offer it in the model picker and fail at the first turn.
+    orcarouter:
+      displayName: OrcaRouter
+      api: openai-completions
+      baseURL: https://api.orcarouter.ai/v1
+      # Same credential seam as every other route: a name, never the key.
+      apiKeyEnv: ORCAROUTER_API_KEY
+
+      models:
+        # The one route that serves on a zero balance. A reasoning model: it
+        # returns `reasoning_content` alongside `content`, and reasoning tokens
+        # are drawn from the SAME output budget — a 16-token cap produced an empty
+        # content field and finish_reason "length", which looks like a broken
+        # model rather than an exhausted budget. 8192 leaves ample room; do not
+        # tighten it below ~1024.
+        - id: deepseek/deepseek-v4-flash-free
+          name: DeepSeek V4 Flash (OrcaRouter — free)
+          contextWindow: 1048576
+          maxTokens: 8192
+
+        # OrcaRouter's own free router. Resolves to the model above today
+        # (x-orca-resolved-model says so), but it is a routing decision they can
+        # change, and it intermittently 402s. Listed after the explicit id so the
+        # picker's first OrcaRouter entry is the predictable one.
+        - id: orcarouter/free
+          name: OrcaRouter Free (auto-routed — intermittent 402)
+          contextWindow: 200000
+          maxTokens: 8192
+
+    # ── Gemini, via the local shim ──────────────────────────────────────────
+    #
+    # baseURL points at 127.0.0.1, not at Google, because two separate things
+    # have to be rewritten between pi-ai and Google's OpenAI-compat surface:
+    #
+    # 1. THE REQUEST SCHEMA. Google implements a subset of OpenAI's schema and
+    #    rejects the whole payload on an unknown field. pi-ai sends `store`, so
+    #    every turn answered
+    #      400 — Invalid JSON payload received. Unknown name "store".
+    #    This is why the route had never worked once, for anyone, at any
+    #    reasoning level. The shim strips 12 empirically-determined fields and
+    #    resolves the max_tokens/max_completion_tokens conflict Google also
+    #    refuses. It additionally strips-and-retries any *future* unknown field,
+    #    because this outage was caused by exactly one field being added.
+    #
+    # 2. THOUGHT SIGNATURES. Gemini 3.x requires the thought_signature it
+    #    returns with each tool call to be echoed back, and it travels in a
+    #    non-standard `tool_calls[].extra_content.google` field that pi-ai's
+    #    openai-completions path drops — so a second turn after any tool call
+    #    answers 400. Verified: replay with the field = 200, without = 400, at
+    #    every reasoning level including omitted and "none".
+    #
+    # deploy/harness/gemini-shim/ holds the proxy, its unit, and the evidence.
+    # `curl 127.0.0.1:8787/healthz` reports cache size and how many fields it
+    # has dropped, which is the fastest way to confirm it is doing both jobs.
+    #
+    # pi-ai does not recognise a localhost endpoint, so it applies its OpenAI
+    # defaults: system prompt as the `developer` role, output cap as
+    # `max_completion_tokens`, thinking level as a bare `reasoning_effort`.
+    # All three were tested against Google's compat surface and accepted, which
+    # is why this route needs no `compat` overrides.
+    gemini:
+      displayName: Gemini (via local shim)
+      api: openai-completions
+      baseURL: http://127.0.0.1:8787/v1
+      # Resolved per request through the credential seam; the key lives only in
+      # deploy/harness/harness.env (gitignored) and never enters this file.
+      apiKeyEnv: GEMINI_API_KEY
+
+      # ── AI STUDIO ids below; VERTEX needs a different shape ─────────────
+      #
+      # The ids here (`gemini-3.6-flash`) are correct for the shim's default
+      # AI Studio backend. If you switch the shim to Vertex — which you may have
+      # to, because AI Studio would not serve gemini-3.7-flash at all — then
+      # EVERY id in this route must become `<publisher>/<model>`:
+      #
+      #     - id: google/gemini-3.7-flash
+      #
+      # and `agent-default-model` below must match. Vertex rejects a bare id with
+      # 400 "Malformed publisher model ... expected '<publisher>/<model>'". Vertex
+      # also carries different models per location: gemini-3.7-flash exists only
+      # at locations/global on the project this was tested against, while
+      # us-central1 served gemini-2.5-flash and 404'd on 3.7 and 3.6.
+      #
+      # See deploy/harness/gemini-shim/README.md for the backend switch and the
+      # security tradeoff it carries.
+      # Availability sweep 2026-08-30, same key, same minute:
+      #   gemini-3.7-flash       503 "experiencing high demand", then timed out
+      #   gemini-3.6-flash       200
+      #   gemini-3.5-flash       200
+      #   gemini-3.1-flash-lite  200
+      # So 3.6 leads. 3.7 stays listed because the crunch is transient, but a
+      # default that 503s is indistinguishable from a broken install.
+      #
+      # `maxTokens: 8192` on all of them to match the house convention; Google
+      # will serve up to 65536 if you raise it.
+      #
+      # `off` is deliberately absent from every reasoningEfforts block: as a bare
+      # YAML key it parses as boolean false under YAML 1.1. Add it as
+      # `"off": none` (quoted) if wanted — Google does accept effort "none".
+      models:
+        # The default. Full 1M context, reasoning, tools, text+image.
+        - id: gemini-3.6-flash
+          name: Gemini 3.6 Flash
+          contextWindow: 1048576
+          maxTokens: 8192
+          input: [ text, image ]
+          reasoningEfforts:
+            low: low
+            medium: medium
+            high: high
+
+        # Newest, and the one to prefer once Google's capacity settles.
+        - id: gemini-3.7-flash
+          name: Gemini 3.7 Flash (503s under load)
+          contextWindow: 1048576
+          maxTokens: 8192
+          input: [ text, image ]
+          reasoningEfforts:
+            low: low
+            medium: medium
+            high: high
+
+        # Older, and noticeably steadier under load than either 3.6 or 3.7.
+        - id: gemini-3.5-flash
+          name: Gemini 3.5 Flash
+          contextWindow: 1048576
+          maxTokens: 8192
+          input: [ text, image ]
+          reasoningEfforts:
+            low: low
+            medium: medium
+            high: high
+
+        # Cheapest and fastest of the four. For routine tool-loop turns where the
+        # reasoning quality of a Flash model is more than the step needs.
+        - id: gemini-3.1-flash-lite
+          name: Gemini 3.1 Flash Lite
+          contextWindow: 1048576
+          maxTokens: 8192
+          reasoningEfforts:
+            low: low
+            medium: medium
+            high: high
+
+# Gemini leads because it is the only route on this box that is both free and
+# actually answering. Measured 2026-08-30:
+#   - the OpenRouter key is out of credit: every paid model 402s with "requires
+#     more credits... you requested up to 8192 tokens, but can only afford 245",
+#     and its :free models share one exhausted 50/day account-wide allowance;
+#   - the OrcaRouter account has a $0 balance and a free-tier prompt-length cap
+#     (400 err_free_prompt_cap) that a real agent context exceeds immediately;
+#   - Google AI Studio's free tier has neither problem, and gemini-3.6-flash
+#     returned 200 with tool calls working end-to-end through the shim.
+# Move this back to a paid OpenRouter model the moment there is credit to spend.
+agent-default-model:
+  provider: gemini
+  model: gemini-3.6-flash

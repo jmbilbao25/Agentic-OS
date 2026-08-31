@@ -95,14 +95,23 @@ SCHEMA = [
       help="Stored in settings.local.json, which is gitignored. Never sent back "
            "to the browser — you get a masked hint instead.",
       placeholder="sk-or-v1-…"),
-    F("LLM_MODEL", "model", "meta-llama/llama-3.3-70b-instruct:free",
+    # Verified present in OpenRouter's catalogue on 2026-08-30. The previous
+    # default, meta-llama/llama-3.3-70b-instruct:free, had been retired upstream
+    # and no longer appears in /api/v1/models at all — so a fresh install's very
+    # first Ask failed with a model-not-found, which reads as "the app is broken"
+    # rather than "that default expired". Free routes get withdrawn regularly;
+    # re-check this one against the live catalogue rather than trusting it.
+    F("LLM_MODEL", "model", "nvidia/nemotron-3.5-lightning:free",
       group="inference", label="Model",
       help="The model that answers Ask. Swap it live; no restart."),
     F("LLM_FALLBACK_MODELS", "csv", "",
       group="inference", label="Fallback models",
       help="Tried in order if the primary is rate-limited or down. OpenRouter "
-           "routes these server-side; other providers get a client-side retry.",
-      placeholder="anthropic/claude-3.5-haiku, openai/gpt-4o-mini"),
+           "routes these server-side (3 per request, see llm.py:_batches); "
+           "other providers get a client-side retry. Note that every :free "
+           "model draws on ONE account-wide quota, so a chain of free models "
+           "does not survive the daily cap — only a per-minute spike.",
+      placeholder="nvidia/nemotron-3-ultra-550b-a55b:free, minimax/minimax-m2.7:free"),
     F("LLM_TEMPERATURE", "float", 0.2, lo=0.0, hi=2.0, step=0.05,
       group="inference", label="Temperature",
       help="Low for grounded recall. Raise it only if answers feel mechanical."),

@@ -35,3 +35,23 @@ id_ecdsa*
 id_ed25519*
 *.env
 !server/.env.example
+
+# GCP service-account keys. These arrive as ordinary-looking .json, which the
+# patterns above do not catch, and they are an identity rather than a scoped
+# token — the worst single file to leak. Belt and braces: the shim's Vertex mode
+# expects this file OUTSIDE the repo entirely (~/.dsh-harness/), and these
+# patterns exist so that putting one here anyway is still not publishable.
+*service-account*.json
+*-sa.json
+sa.json
+vertex-sa.json
+gcp-*.json
+application_default_credentials.json
+
+# Timestamped backups of credential files. `cp -a server/.env server/.env.bak.$(date)`
+# is the natural thing to do before editing, and `*.env` does not match
+# `.env.bak.20260830-164557`, so the copy was publishable while the original was
+# not. Same for the harness env and any settings file holding a key.
+*.env.bak*
+*.bak.[0-9]*
+settings.local.json*

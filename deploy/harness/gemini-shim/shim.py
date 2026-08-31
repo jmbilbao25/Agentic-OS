@@ -64,12 +64,15 @@ conversations, not durable state. A restart loses it, which costs one 400 on any
 conversation mid-tool-call; the next turn re-establishes it.
 """
 
+import base64
 import json
 import os
 import re
 import sys
 import threading
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -79,6 +82,121 @@ UPSTREAM = os.environ.get(
 ).rstrip("/")
 HOST = os.environ.get("SHIM_HOST", "127.0.0.1")
 PORT = int(os.environ.get("SHIM_PORT", "8787"))
+
+# ---------------------------------------------------------------- vertex mode
+#
+# Off unless VERTEX_SA_JSON and VERTEX_PROJECT are both set. Two reasons to turn
+# it on, and both were measured on 2026-08-31:
+#
+#   * AI Studio would not serve gemini-3.7-flash at all — 503 "experiencing high
+#     demand", then read timeouts, repeatedly, across hours. The same model on
+#     Vertex at locations/global answered 200 first try.
+#   * Vertex accepts `store`, which AI Studio rejects. The sanitiser below is
+#     harmless here, and still required for the AI Studio path.
+#
+# What does NOT change: the thought_signature requirement is identical. Verified
+# on Vertex — replay with the signature 200, replay without it
+# 400 "Function call is missing a thought_signature in functionCall parts". So the
+# cache below earns its keep on both backends.
+#
+# THE HONEST COST, because the unit was written to avoid exactly this. Vertex
+# authenticates with a short-lived OAuth token minted from a service-account
+# private key, not a static API key, so pi-ai's `apiKeyEnv` seam cannot carry it
+# — an env var cannot refresh itself hourly. That means the shim has to hold a
+# credential, and gemini-shim.service was deliberately built so it could not:
+# ProtectHome=read-only, ProtectSystem=strict, and InaccessiblePaths naming
+# server/.env and harness.env, with the comment "the shim does NOT get
+# GEMINI_API_KEY". Turning this on walks that back, and a service-account key is
+# a worse thing to hold than an API key: it is an identity, not a scoped token.
+#
+# So: keep the SA file mode 600, grant it via a single ReadOnlyPaths entry and
+# nothing broader, and give the account the narrowest role that works
+# (roles/aiplatform.user). If you want the original property back, mint the token
+# out-of-process — a systemd timer writing a fresh token to a file every 45
+# minutes, with VERTEX_TOKEN_FILE pointing at it — and the shim then holds only a
+# derived credential that expires, never the private key. That is the better
+# design; this is the one that fits in the seam that exists today.
+VERTEX_SA_JSON = os.environ.get("VERTEX_SA_JSON", "").strip()
+VERTEX_TOKEN_FILE = os.environ.get("VERTEX_TOKEN_FILE", "").strip()
+VERTEX_PROJECT = os.environ.get("VERTEX_PROJECT", "").strip()
+# `global` is not a typo and not a default worth changing casually: it is the only
+# location that served gemini-3.7-flash on this project. us-central1 answered 404
+# "Publisher model ... not found or your project does not have access" for both
+# 3.7 and 3.6, while serving gemini-2.5-flash fine. Region availability for
+# Gemini is per-model, so re-probe before pinning a region.
+VERTEX_LOCATION = os.environ.get("VERTEX_LOCATION", "global").strip()
+VERTEX_MODE = bool(VERTEX_PROJECT and (VERTEX_SA_JSON or VERTEX_TOKEN_FILE))
+_TOKEN_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+# Refresh this far before the token actually dies, so a long reasoning turn that
+# starts near the boundary does not finish holding an expired credential.
+_TOKEN_SKEW = 300.0
+
+_tok_lock = threading.Lock()
+_tok = {"value": "", "expires": 0.0}
+
+
+def _vertex_upstream() -> str:
+    """Vertex's OpenAI-compatible surface. Note `global` has no host prefix."""
+    host = ("https://aiplatform.googleapis.com" if VERTEX_LOCATION == "global"
+            else "https://%s-aiplatform.googleapis.com" % VERTEX_LOCATION)
+    return ("%s/v1/projects/%s/locations/%s/endpoints/openapi"
+            % (host, VERTEX_PROJECT, VERTEX_LOCATION))
+
+
+def _b64u(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def _mint_token() -> str:
+    """Exchange the service-account key for an access token.
+
+    Signs the assertion with `cryptography`, which is already on the system
+    Python here, rather than adding google-auth. That keeps this file a
+    stdlib-plus-one-present-library script, which is the same reason
+    automations/research.py parses HTML with a regex instead of a parser.
+    """
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    with open(VERTEX_SA_JSON, "rb") as fh:
+        sa = json.load(fh)
+    now = int(time.time())
+    token_uri = sa.get("token_uri") or "https://oauth2.googleapis.com/token"
+    header = {"alg": "RS256", "typ": "JWT", "kid": sa.get("private_key_id")}
+    claims = {"iss": sa["client_email"], "scope": _TOKEN_SCOPE, "aud": token_uri,
+              "iat": now, "exp": now + 3600}
+    signing_input = ("%s.%s" % (_b64u(json.dumps(header).encode()),
+                                _b64u(json.dumps(claims).encode()))).encode()
+    key = serialization.load_pem_private_key(sa["private_key"].encode(), password=None)
+    assertion = "%s.%s" % (signing_input.decode(),
+                           _b64u(key.sign(signing_input, padding.PKCS1v15(),
+                                          hashes.SHA256())))
+    body = urllib.parse.urlencode({
+        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "assertion": assertion}).encode()
+    req = urllib.request.Request(
+        token_uri, data=body,
+        headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        payload = json.load(r)
+    with _tok_lock:
+        _tok["value"] = payload["access_token"]
+        _tok["expires"] = time.time() + float(payload.get("expires_in", 3600))
+    log("minted a Vertex access token, good for %ss" % payload.get("expires_in"))
+    return _tok["value"]
+
+
+def _vertex_auth() -> str:
+    """A live bearer token, refreshed slightly before it expires."""
+    if VERTEX_TOKEN_FILE:
+        # Out-of-process minting: whatever wrote this file owns the private key,
+        # and the shim only ever sees the expiring token it derived.
+        with open(VERTEX_TOKEN_FILE) as fh:
+            return "Bearer " + fh.read().strip()
+    with _tok_lock:
+        if _tok["value"] and time.time() < _tok["expires"] - _TOKEN_SKEW:
+            return "Bearer " + _tok["value"]
+    return "Bearer " + _mint_token()
 # Each signature is ~500 bytes of base64; 2000 entries is a few MB, which matters
 # on a t3.micro already running the harness under a 340M cap.
 MAX_CACHE = int(os.environ.get("SHIM_CACHE_ENTRIES", "2000"))
@@ -309,7 +427,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.rstrip("/") in ("/healthz", "/v1/healthz"):
             with _lock:
-                self._json(200, {"ok": True, "cached_signatures": len(_sigs), **_stats})
+                body = {"ok": True, "cached_signatures": len(_sigs), **_stats}
+            body["backend"] = "vertex" if VERTEX_MODE else "ai-studio"
+            if VERTEX_MODE:
+                body["vertex"] = {
+                    "project": VERTEX_PROJECT, "location": VERTEX_LOCATION,
+                    # Seconds of life left on the cached token: 0 means the next
+                    # request mints a fresh one, which is normal, not an error.
+                    "token_ttl": max(0, int(_tok["expires"] - time.time())),
+                    "token_source": "file" if VERTEX_TOKEN_FILE else "service-account",
+                }
+            self._json(200, body)
         else:
             self._json(404, {"error": {"message": f"no route for GET {self.path}"}})
 
@@ -349,15 +477,33 @@ class Handler(BaseHTTPRequestHandler):
         if n:
             log(f"re-attached {n} signature(s) | model={body.get('model')} stream={streaming}")
 
-        auth = self.headers.get("Authorization")
-        if not auth:
-            fallback = os.environ.get("GEMINI_API_KEY", "").strip()
-            if fallback:
-                auth = "Bearer " + fallback
-        if not auth:
-            self._json(401, {"error": {"message":
-                "shim received no Authorization header and GEMINI_API_KEY is unset"}})
-            return
+        # In Vertex mode the credential DSH sent is discarded and replaced with a
+        # minted OAuth token: pi-ai can only carry a static string in apiKeyEnv,
+        # and Vertex will not accept one. Everywhere else the client's header is
+        # still forwarded verbatim, so the AI Studio path keeps the property that
+        # the shim never holds a key.
+        if VERTEX_MODE:
+            base = _vertex_upstream()
+            try:
+                auth = _vertex_auth()
+            except Exception as exc:                                # noqa: BLE001
+                self._json(502, {"error": {"message":
+                    "shim could not mint a Vertex token: %s: %s"
+                    % (type(exc).__name__, exc)}})
+                log("vertex token mint failed: %s" % exc)
+                return
+        else:
+            base = UPSTREAM
+            auth = self.headers.get("Authorization")
+            if not auth:
+                fallback = os.environ.get("GEMINI_API_KEY", "").strip()
+                if fallback:
+                    auth = "Bearer " + fallback
+            if not auth:
+                self._json(401, {"error": {"message":
+                    "shim received no Authorization header and GEMINI_API_KEY is "
+                    "unset"}})
+                return
 
         # Adaptive strip-and-retry.
         #
@@ -370,7 +516,7 @@ class Handler(BaseHTTPRequestHandler):
         resp = None
         for attempt in range(MAX_FIELD_STRIPS + 1):
             req = urllib.request.Request(
-                f"{UPSTREAM}/chat/completions",
+                f"{base}/chat/completions",
                 data=json.dumps(body).encode(),
                 headers={"Authorization": auth, "Content-Type": "application/json",
                          "Accept": "text/event-stream" if streaming else "application/json"},
@@ -471,7 +617,16 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
-    log(f"listening on http://{HOST}:{PORT}  ->  {UPSTREAM}")
+    target = _vertex_upstream() if VERTEX_MODE else UPSTREAM
+    log(f"listening on http://{HOST}:{PORT}  ->  {target}")
+    if VERTEX_MODE:
+        log("backend=vertex project=%s location=%s token=%s"
+            % (VERTEX_PROJECT, VERTEX_LOCATION,
+               "file" if VERTEX_TOKEN_FILE else "service-account key"))
+        log("model ids on this backend MUST be '<publisher>/<model>', e.g. "
+            "google/gemini-3.7-flash — a bare id is rejected 400")
+    else:
+        log("backend=ai-studio (set VERTEX_SA_JSON + VERTEX_PROJECT for Vertex)")
     log(f"cache={MAX_CACHE} entries  upstream_timeout={TIMEOUT}s")
     try:
         ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()

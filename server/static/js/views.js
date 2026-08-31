@@ -242,9 +242,43 @@ export class AskView {
     this.onBusy(false);
     this.sendEl.disabled = false;
     this.abort = null;
+    // A queued repaint outlives an aborted stream otherwise, and lands one frame
+    // later on top of whatever replaced the answer.
+    if (this._paintRaf) {
+      cancelAnimationFrame(this._paintRaf);
+      this._paintRaf = null;
+    }
   }
 
+  /* Streaming calls this once per token, and it used to rebuild everything each
+     time: a full markdown parse of the whole answer so far, an innerHTML
+     teardown of the entire subtree, then `scrollTop = scrollHeight`, which
+     forces a synchronous layout. That is O(N^2) work for an N-token answer, and
+     it got slower exactly as the answer got longer — the thing you are watching.
+     It had two visible costs beyond speed: the open <details> collapsed on every
+     token, and any text you tried to select was destroyed under the cursor.
+
+     So coalesce: at most one repaint per animation frame, no matter how fast the
+     tokens arrive. The frame budget is the natural rate limit here because
+     repainting faster than the display refreshes is work nobody can see. The
+     final paint is never coalesced and never dropped. */
   paint(final = false) {
+    if (final) {
+      if (this._paintRaf) {
+        cancelAnimationFrame(this._paintRaf);
+        this._paintRaf = null;
+      }
+      this._paintNow(true);
+      return;
+    }
+    if (this._paintRaf) return;          // a repaint is already queued
+    this._paintRaf = requestAnimationFrame(() => {
+      this._paintRaf = null;
+      this._paintNow(false);
+    });
+  }
+
+  _paintNow(final = false) {
     const think = this.think.trim() ? `<details class="think">
       <summary>Reasoning</summary>
       <div class="think-body">${esc(this.think)}</div></details>` : '';
@@ -259,9 +293,26 @@ export class AskView {
         <svg class="i" aria-hidden="true"><use href="#i-copy"/></svg>Copy</button>
     </div>` : '';
 
-    this.answerEl.innerHTML = think + md(this.text) + foot;
+    // Carry the disclosure state across the rebuild. Reasoning arrives before the
+    // answer does, so this <details> is usually the thing you opened first and
+    // the thing that got slammed shut on the next token.
+    const wasOpen = this.answerEl.querySelector('details.think')?.open;
+
+    // Read scroll position BEFORE the write. Sticking to the bottom is right only
+    // while the reader is already there; scrolling up mid-answer is a deliberate
+    // act and yanking them back down fights them.
     const b = this.answerEl.closest('.view-body');
-    if (b && !final) b.scrollTop = b.scrollHeight;
+    const pinned = b
+      ? b.scrollHeight - b.scrollTop - b.clientHeight < 48
+      : false;
+
+    this.answerEl.innerHTML = think + md(this.text) + foot;
+
+    if (wasOpen !== undefined) {
+      const d = this.answerEl.querySelector('details.think');
+      if (d) d.open = wasOpen;
+    }
+    if (b && !final && pinned) b.scrollTop = b.scrollHeight;
   }
 
   renderSources(list) {

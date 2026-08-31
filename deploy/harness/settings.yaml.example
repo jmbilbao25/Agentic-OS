@@ -14,6 +14,28 @@
 # the moment this section supplies profiles. This is also exactly what the web
 # Models page writes, so anything set here can be changed from the UI later.
 
+# ─────────────────────────────────────────────────────────────────────────────
+# EVERY ROUTE LISTED BELOW NEEDS ITS KEY PRESENT, INCLUDING ONES YOU NEVER USE.
+#
+# pi-ai resolves each route's `apiKeyEnv` at STARTUP, not on first use, and one
+# unresolved variable aborts the whole harness rather than disabling that single
+# route:
+#
+#   dsh: MISSING_CREDENTIAL: llm-pi-ai: no credential for provider route
+#        "orcarouter"; its profile resolves ORCAROUTER_API_KEY, which is not set
+#
+# The agent does not start. Not degraded — absent. And `dsh --dump-config` will
+# NOT catch it: that command resolves the cordis overlay only and never reads this
+# file's provider block, so it exits 0 on a config that cannot boot.
+#
+# So if you have only an OpenRouter key, delete the `orcarouter` and `gemini`
+# blocks rather than leaving them in place unconfigured. The three variables this
+# file expects, all read by the unit via EnvironmentFile:
+#
+#   OPENROUTER_API_KEY   server/.env
+#   ORCAROUTER_API_KEY   server/.env
+#   GEMINI_API_KEY       deploy/harness/harness.env
+# ─────────────────────────────────────────────────────────────────────────────
 llm-pi-ai:
   providers:
     # The route key IS the provider name referenced by `agent-default-model` in
